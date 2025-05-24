@@ -1,0 +1,718 @@
+```{r}
+gc() 
+rm(list = ls()) #Remove variables from previous runs
+```
+
+```{r}
+# install.packages("devtools")
+# devtools::install_github("alexandermxu/SPANTCR")
+# install.packages("VennDiagram")
+# install.packages("ggseqlogo")
+#install.packages("ggpubr")
+```
+
+```{r}
+library(SPANTCR)
+library(data.table)
+library(ggplot2)
+library(VennDiagram)
+library(ggseqlogo)
+library(ggpubr)
+library(readxl)
+library(cdr3tools)
+library(dplyr)
+```
+
+```{r}
+dt_scale <- fread("/Users/jessie/Downloads/Clustered_Allo_cs.csv", select = c("tag", "clone_scales"))
+
+dt <- fread("/Users/jessie/Downloads/NewClustering.csv", select = c("tag", "cdr3_amino_acid", "v_resolved", "j_resolved", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "GVHD_GRADE_1", "PTCy", "cell_type","PatientID", "DonorType", "Onset"))
+
+setkey(dt, tag)
+setkey(dt_scale, tag)
+
+# Perform a left join to keep only rows from dt and add clone_scales
+dt <- dt[dt_scale, on = "tag", nomatch = 0]
+
+dt[PatientID %in% c("R067", "R160"), GVHD_GRADE_1 := "Mild"]
+
+setnames(dt, c("cdr3_amino_acid", "v_resolved", "j_resolved"), c("CDR3", "Vgene", "Jgene"))
+dt[, gene := "TRB"]
+
+dt_unique <- unique(dt)
+```
+
+```{r}
+#by basis
+
+new_thresholds <- c(
+  "1" = 0.055255063,
+  "2" = 0.13975275,
+  "3" = 0.060886793,
+  "4" = 0.09434857,
+  "5" = 0.2077952,
+  "6" = 0.06637823,
+  "7" = 0.050072215,
+  "8" = 0.13079754,
+  "9" = 0.06395816,
+  "10" = 0.066668764
+)
+
+#without clone_scales filter
+create_cluster_subset <- function(dt, basis) {
+  basis <- as.character(basis)  # Ensure basis is treated as a character
+  threshold <- new_thresholds[basis]  # Get the corresponding threshold value
+
+  subset_dt <- dt[dt[[basis]] > threshold, .(CDR3 = CDR3, Vgene = Vgene, Jgene = Jgene, gene = "TRB", score = get(basis), PatientID = PatientID)] #, Grade = GVHD_GRADE_1
+
+  return(unique(subset_dt))
+}
+
+
+dt_b <- vector("list", 10)
+for (i in 1:10) {
+  dt_b[[i]] <- create_cluster_subset(dt, i) 
+}
+```
+
+```{r}
+load("/Users/jessie/Downloads/AminoAcidFilter (1).rda")
+hydrophobicity_chart <- read.csv("/Users/jessie/Downloads/HydrophobicityScale.csv")
+
+calculate_hydrophobicity <- function(cdr3_string, hydrophobicity_table) {
+    cdr3_string <- as.character(cdr3_string)
+  hydrophobicity_sum <- 0
+  num_amino_acids <- 0
+
+  for (amino_acid in strsplit(cdr3_string, NULL)[[1]]) {
+    hydrophobicity_value <- hydrophobicity_table$Hydrophobicity[hydrophobicity_table$AA == amino_acid]
+    if (length(hydrophobicity_value) > 0) {
+      hydrophobicity_sum <- hydrophobicity_sum + hydrophobicity_value
+      num_amino_acids <- num_amino_acids + 1
+    }
+  }
+
+  if (num_amino_acids > 0) {
+    hydrophobicity_mean <- hydrophobicity_sum / num_amino_acids
+  } else {
+    hydrophobicity_mean <- 0
+  }
+
+  return(hydrophobicity_mean)
+}
+
+#this is for position 5-13
+calculate_hydrophobicity_for_positions <- function(strings, hydrophobicity_table) {
+  process_string <- function(string) {
+    string <- as.character(string)  # Ensure string is a character vector
+
+    if (nchar(string) < 13) {
+      return(NA)
+    } else {
+      substring_to_use <- substring(string, 5, 13)
+      return(calculate_hydrophobicity(substring_to_use, hydrophobicity_table))
+    }
+  }
+
+  hydrophobicity <- sapply(strings, process_string)
+
+  return(hydrophobicity)
+}
+```
+
+```{r}
+# Calculate hydrophobicity for basis
+
+#for 5-13
+motif_hydrophobicity <- list(
+  b1 = calculate_hydrophobicity_for_positions(dt_b[[1]]$CDR3, hydrophobicity_table = hydrophobicity_chart),
+  b2 = calculate_hydrophobicity_for_positions(dt_b[[2]]$CDR3, hydrophobicity_table = hydrophobicity_chart),
+  # b3 = calculate_hydrophobicity_for_positions(dt_b[[3]]$CDR3, hydrophobicity_table = hydrophobicity_chart),
+  b4 = calculate_hydrophobicity_for_positions(dt_b[[4]]$CDR3, hydrophobicity_table = hydrophobicity_chart),
+  # b5 = calculate_hydrophobicity_for_positions(dt_b[[5]]$CDR3, hydrophobicity_table = hydrophobicity_chart),
+  # b6 = calculate_hydrophobicity_for_positions(dt_b[[6]]$CDR3, hydrophobicity_table = hydrophobicity_chart),
+  b7 = calculate_hydrophobicity_for_positions(dt_b[[7]]$CDR3, hydrophobicity_table = hydrophobicity_chart),
+  b8 = calculate_hydrophobicity_for_positions(dt_b[[8]]$CDR3, hydrophobicity_table = hydrophobicity_chart),
+  b9 = calculate_hydrophobicity_for_positions(dt_b[[9]]$CDR3, hydrophobicity_table = hydrophobicity_chart)
+  # b10 = calculate_hydrophobicity_for_positions(dt_b[[10]]$CDR3, hydrophobicity_table = hydrophobicity_chart)
+  # b14 = calculate_hydrophobicity_for_positions(dt_b[[14]]$CDR3, hydrophobicity_table = hydrophobicity_chart)
+)
+
+#This is for entire CDR3
+# motif_hydrophobicity <- list(
+#   b1 = sapply(dt_b[[1]]$CDR3, calculate_hydrophobicity, hydrophobicity_table = hydrophobicity_chart),
+#   b2 = sapply(dt_b[[2]]$CDR3, calculate_hydrophobicity, hydrophobicity_table = hydrophobicity_chart),
+#   # b3 = calculate_hydrophobicity_for_positions(dt_b[[3]]$CDR3, hydrophobicity_table = hydrophobicity_chart),
+#   b4 = sapply(dt_b[[4]]$CDR3, calculate_hydrophobicity, hydrophobicity_table = hydrophobicity_chart),
+#   # b5 = calculate_hydrophobicity_for_positions(dt_b[[5]]$CDR3, hydrophobicity_table = hydrophobicity_chart),
+#   # b6 = calculate_hydrophobicity_for_positions(dt_b[[6]]$CDR3, hydrophobicity_table = hydrophobicity_chart),
+#   b7 = sapply(dt_b[[7]]$CDR3, calculate_hydrophobicity, hydrophobicity_table = hydrophobicity_chart),
+#   b8 = sapply(dt_b[[8]]$CDR3, calculate_hydrophobicity, hydrophobicity_table = hydrophobicity_chart),
+#   b9 = sapply(dt_b[[9]]$CDR3, calculate_hydrophobicity, hydrophobicity_table = hydrophobicity_chart)
+#   # b10 = calculate_hydrophobicity_for_positions(dt_b[[10]]$CDR3, hydrophobicity_table = hydrophobicity_chart)
+#   # b14 = calculate_hydrophobicity_for_positions(dt_b[[14]]$CDR3, hydrophobicity_table = hydrophobicity_chart)
+# )
+
+combined_hydrophobicity <- data.frame(
+  Segment = rep(names(motif_hydrophobicity), sapply(motif_hydrophobicity, length)),
+  Hydrophobicity = unlist(motif_hydrophobicity, use.names = FALSE)
+)
+
+library(dplyr)
+
+#group all basis by severity
+combined_hydrophobicity_grouped <- combined_hydrophobicity %>%
+  mutate(BasisGroup = case_when(
+    Segment %in% c("b4", "b8") ~ "no_basis",
+    Segment %in% c("b1") ~ "mild_basis",
+    Segment %in% c("b2", "b7", "b9") ~ "severe_basis"
+  ))
+
+combined_hydrophobicity_grouped$BasisGroup <- factor(
+  combined_hydrophobicity_grouped$BasisGroup,
+  levels = c("no_basis", "mild_basis", "severe_basis")
+)
+
+p <- ggplot(combined_hydrophobicity_grouped, aes(x = BasisGroup, y = Hydrophobicity, fill = BasisGroup)) +
+  geom_violin() +
+  labs(
+    title = "Hydrophobicity Scores by Basis\nPosition 5-13", # \n Position 5-13
+    x = "Basis",
+    y = "Hydrophobicity Score"
+  ) +
+  theme_pubr() +
+  scale_fill_manual(values = c(
+    "severe_basis" = "#B85000",
+    "mild_basis" = "#005A8F",
+    "no_basis" = "#09BB8C"
+  )) +
+  stat_compare_means(
+    method = "wilcox.test", 
+    comparisons = list(c("severe_basis", "mild_basis"), 
+                       c("severe_basis", "no_basis"), 
+                       c("mild_basis", "no_basis")),
+    label = "p.signif",   # Show significance stars
+    p.adjust.method = "holm",
+    size = 6 
+  )+
+  theme(
+    plot.title = element_text(size = 32, hjust = 0.5),    # Title size
+    axis.title.x = element_text(size = 32),                        # Removes X-axis title
+    axis.title.y = element_text(size = 32),                # Y-axis label size
+    axis.text = element_text(size = 22),                   # Axis tick labels size
+    legend.text = element_text(size = 20),                 # Legend text size
+    legend.title = element_text(size = 20)                 # Legend title size
+  )
+
+# plot(p)
+
+# Save the plot to the specified file path with 300 DPI
+ggsave("/Users/jessie/Downloads/Basis_Hydrophobicity_5-13.png", plot = p, dpi = 300, width = 8, height = 6)
+
+```
+
+```{r}
+data <- fread("/Users/jessie/Downloads/AllClones.csv")
+
+data[PatientID %in% c("R067", "R160"), GVHD_GRADE_1 := "Mild"]
+
+allo_data <- unique(data[allo == TRUE &
+!GVHD_GRADE_1 %in% c("Unclassified/Severe") &
+timepoint == "MLRCFSElo", ])
+
+nonallo_data <- unique(data[allo == FALSE &
+!GVHD_GRADE_1 %in% c("Unclassified/Severe") &
+timepoint == "MLRCFSElo", ])
+```
+
+```{r}
+# #length allo vs nonallo
+allo_data <- allo_data %>%
+  mutate(cdr3_length = nchar(cdr3_amino_acid))
+
+nonallo_data <- nonallo_data %>%
+  mutate(cdr3_length = nchar(cdr3_amino_acid))
+
+combined_data <- bind_rows(
+  allo_data %>% mutate(Group = "Allo"),
+  nonallo_data %>% mutate(Group = "Non-Allo")
+)
+
+ggplot(combined_data, aes(x = Group, y = cdr3_length)) +
+  geom_boxplot() +
+  labs(title = "Comparison of CDR3 Amino Acid Lengths",
+       x = "Group",
+       y = "CDR3 Amino Acid Length") +
+  theme_minimal()
+```
+```{r}
+#length (severities in allo)
+filtered_unique_data <- allo_data %>%
+  mutate(cdr3_length = nchar(cdr3_amino_acid))
+
+ordered_grades <- c("Severe", "Mild", "No")
+
+filtered_unique_data <- filtered_unique_data %>%
+  mutate(GVHD_GRADE_1 = factor(GVHD_GRADE_1, levels = ordered_grades))
+
+ggplot(filtered_unique_data, aes(x = GVHD_GRADE_1, y = cdr3_length, fill = GVHD_GRADE_1)) +
+  geom_boxplot() +
+  labs(title = "Median CDR3 Amino Acid Lengths by GVHD Grade",
+       x = "GVHD Grade",
+       y = "Median CDR3 Amino Acid Length") +
+  scale_x_discrete(limits = ordered_grades) +
+  scale_fill_manual(values = c("Severe" = "#B85000", "Mild" = "#005A8F", "No" = "#09BB8C")) +
+  theme_pubr()
+
+pairwise.wilcox.test(
+  filtered_unique_data$cdr3_length,
+  filtered_unique_data$GVHD_GRADE_1,
+  p.adjust.method = "holm"
+)
+
+#severe+mild vs no
+
+# Create a new variable that combines Severe and Mild into one category
+filtered_unique_data <- filtered_unique_data %>%
+  mutate(GVHD_Group = ifelse(GVHD_GRADE_1 %in% c("No", "Mild"), "Mild+No", "Severe"))
+
+# Order the new GVHD_Group levels
+ordered_groups <- c("Severe", "Mild+No")
+
+# Create the boxplot for the new grouping
+ggplot(filtered_unique_data, aes(x = GVHD_Group, y = cdr3_length, fill = GVHD_Group)) +
+  geom_boxplot() +
+  labs(title = "CDR3 Amino Acid Lengths: GVHD Positive vs No GVHD",
+       x = "GVHD Group",
+       y = "CDR3 Amino Acid Length") +
+  scale_x_discrete(limits = ordered_groups) +
+  scale_fill_manual(values = c("Severe" = "#B85000", "Mild+No" = "#09BB8C")) +
+  theme_pubr()
+
+# Perform the Wilcoxon test for the new groups
+pairwise.wilcox.test(
+  filtered_unique_data$cdr3_length,
+  filtered_unique_data$GVHD_Group,
+  p.adjust.method = "holm"
+)
+
+
+#by patientid
+filtered_unique_data_median <- filtered_unique_data %>%
+  group_by(GVHD_GRADE_1, PatientID) %>%
+  summarize(Median_CDR3_Length = mean(cdr3_length), .groups = 'drop')
+
+library(ggbeeswarm)
+ggplot(filtered_unique_data_median, aes(x = GVHD_GRADE_1, y = Median_CDR3_Length, fill = GVHD_GRADE_1)) +
+  geom_boxplot() +
+  geom_beeswarm() +
+  labs(title = "Mean CDR3 Amino Acid Lengths by GVHD Grade (Per PatientID)",
+       x = "GVHD Grade",
+       y = "Median CDR3 Amino Acid Length") +
+  scale_x_discrete(limits = ordered_grades) +
+  scale_fill_manual(values = c("Severe" = "#B85000", "Mild" = "#005A8F", "No" = "#09BB8C")) +
+  theme_pubr()
+
+pairwise.wilcox.test(
+  filtered_unique_data_median$Median_CDR3_Length, 
+  filtered_unique_data_median$GVHD_GRADE_1, 
+  p.adjust.method = "holm"
+)
+```
+
+```{r}
+#blosum62
+library(Biostrings)
+# Define a function to compute distances based on BLOSUM62
+compute_blosum62_distances <- function(seq_vector1, seq_vector2) {
+  # Convert sequences to AAStringSet objects
+  seq_set1 <- AAStringSet(seq_vector1)
+  seq_set2 <- AAStringSet(seq_vector2)
+  
+  # Compute pairwise string distances using BLOSUM62 substitution matrix
+  dist_matrix <- stringDist(seq_set1, seq_set2, method = "substitutionMatrix", 
+                            substitutionMatrix = "BLOSUM62")
+  
+  # Convert distance matrix to a data frame for easier processing
+  dist_df <- as.matrix(dist_matrix)
+  
+  # Calculate mean distances for each sequence in seq_vector1
+  mean_distances <- rowMeans(dist_df)
+  
+  return(mean_distances)
+}
+
+
+combined_dt_b_no <- rbind(dt_b[[4]], dt_b[[8]])
+combined_dt_b_severe <- rbind(dt_b[[2]], dt_b[[7]], dt_b[[9]])
+
+mean_distance_no_mild <- compute_blosum62_distances(combined_dt_b_no$CDR3, dt_b[[1]]$CDR3)
+mean_distance_mild_severe <- compute_blosum62_distances(dt_b[[1]]$CDR3, combined_dt_b_severe$CDR3)
+mean_distance_no_severe <- compute_blosum62_distances(combined_dt_b_no$CDR3, combined_dt_b_severe$CDR3)
+
+distance_data <- data.frame(
+  group = c(rep("No to Mild", length(mean_distance_no_mild)),
+            rep("Mild to Severe", length(mean_distance_mild_severe)),
+            rep("No to Severe", length(mean_distance_no_severe))),
+  mean_distance = c(mean_distance_no_mild, mean_distance_mild_severe, mean_distance_no_severe)
+)
+
+
+# Create a boxplot of the mean distances
+distance_data$group <- factor(distance_data$group, levels = c("No to Mild", "Mild to Severe", "No to Severe"))
+
+# Create the plot with significance stars
+ggplot(distance_data, aes(x = group, y = mean_distance, fill = group)) +  
+  geom_violin() +
+  labs(
+    title = "BLOSUM62 Distance Comparisons",
+    x = "Comparison Group",
+    y = "Mean BLOSUM62 Distance"
+  ) +
+  theme_pubr() +
+  scale_fill_manual(values = c(
+    "No to Mild" = "#058B8E",    # Blend of Teal (No) and Yellow (Mild)
+    "Mild to Severe" = "#659116", # Blend of Yellow (Mild) and Red (Severe)
+    "No to Severe" = "#7B6555"    # Blend of Teal (No) and Red (Severe)
+  )) +
+  theme(
+    plot.title = element_text(size = 30, hjust = 0.5),    # Title size
+    axis.title.x = element_text(size = 32),                              # X-axis title size
+    axis.title.y = element_text(size = 32),                              # Y-axis label size
+    axis.text = element_text(size = 22),                                 # Axis tick labels size
+    legend.text = element_text(size = 20),                               # Legend text size
+    legend.title = element_text(size =20)                               # Legend title size
+  ) +
+  coord_cartesian(ylim = c(min(distance_data$mean_distance), 
+                           max(distance_data$mean_distance) * -1.2)) +    # Add space above violins
+  stat_compare_means(
+    method = "wilcox.test", 
+    comparisons = list(c("No to Mild", "Mild to Severe"), 
+                       c("No to Mild", "No to Severe"), 
+                       c("Mild to Severe", "No to Severe")),
+    label = "p.signif",          # Add significance stars based on p-values
+    p.adjust.method = "holm",    # Use the Holm method for p-value adjustment
+    size = 6                 # Move significance stars upward
+  )
+
+
+ggsave("/Users/jessie/Downloads/BLOSUM62_Distance_Comparisons.png", dpi = 300, width = 8, height = 6)
+
+```
+
+```{r}
+#logo plots
+# Install and load patchwork (if you haven't already)
+# install.packages("patchwork")
+library(patchwork)
+
+# Define the process_and_plot function as before
+process_and_plot <- function(data, index) {
+  max_length <- max(nchar(data$CDR3))
+  
+  dt_severe_samelength <- sapply(data$CDR3, function(x) {
+    if (nchar(x) < max_length) {
+      paste0(x, paste(rep("X", max_length - nchar(x)), collapse = ""))
+    } else {
+      x
+    }
+  })
+  
+  plot <- ggplot() + 
+    geom_logo(dt_severe_samelength) + # Add method if necessary, e.g., method = 'prob'
+    ggtitle(paste("Basis", index)) + 
+    theme_pubr() +
+    theme(
+      axis.title.x = element_blank(),    # Remove x-axis title
+      axis.title.y = element_blank(),    # Remove y-axis title
+      axis.text.x = element_blank(),     # Remove x-axis text
+      axis.text.y = element_blank(),     # Remove y-axis text
+      axis.ticks = element_blank(),      # Remove axis ticks
+      axis.line.x = element_blank(),     # Remove x-axis line
+      axis.line.y = element_blank(),     # Remove y-axis line
+      panel.border = element_blank()     # Remove panel border
+    )
+  
+  return(plot)
+}
+
+# List of indices and generating the plots
+indices <- c(4, 8, 1, 2, 7, 9)
+plots <- lapply(indices, function(i) process_and_plot(dt_b[[i]], i))
+
+# Combine plots into a grid using patchwork with shared legend
+final_plot <- wrap_plots(plots, ncol = 3) + 
+  plot_layout(guides = "collect") &
+  theme(
+    legend.position = "right",        # Move legend to the right of the plots
+    legend.direction = "vertical",    # Stack legend items vertically
+    legend.title = element_text(size = 12),  # Adjust legend title size if needed
+    legend.text = element_text(size = 10)    # Adjust legend text size if needed
+  )
+
+# Display the combined plot
+print(final_plot)
+
+# Save the final combined plot with a shared legend
+ggsave("/Users/jessie/Downloads/Combined_Logo_Plots.png", plot = final_plot, dpi = 300, width = 14, height = 8)
+
+```
+
+```{r}
+#each patientid as a point for diversity
+
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+library(vegan)  
+library(tidyr)
+
+# Function to extract positions and handle different lengths
+extract_positions <- function(sequences, positions) {
+  max_len <- max(nchar(sequences))
+  valid_positions <- positions[positions <= max_len]  # Filter positions to be within sequence lengths
+  sapply(valid_positions, function(pos) {
+    sapply(sequences, function(seq) {
+      if (nchar(seq) >= pos) {
+        substr(seq, pos, pos)
+      } else {
+        NA
+      }
+    })
+  }, simplify = FALSE)
+}
+
+# Function to calculate Shannon diversity
+calculate_shannon_diversity <- function(sequences, positions) {
+  extracted_positions <- extract_positions(sequences, positions)
+  sapply(1:length(positions), function(i) {
+    if (i <= length(extracted_positions)) {
+      pos_data <- extracted_positions[[i]]
+      if (!is.null(pos_data) && length(pos_data) > 0) {
+        pos_counts <- table(pos_data, useNA = "no")
+        diversity(pos_counts, index = "shannon")
+      } else {
+        NA
+      }
+    } else {
+      NA
+    }
+  })
+}
+
+calculate_gini_diversity <- function(sequences, positions) {
+  extracted_positions <- extract_positions(sequences, positions)
+  sapply(1:length(positions), function(i) {
+    if (i <= length(extracted_positions)) {
+      pos_data <- extracted_positions[[i]]
+      if (!is.null(pos_data) && length(pos_data) > 0) {
+        pos_counts <- table(pos_data, useNA = "no")
+        simpson_index <- diversity(pos_counts, index = "simpson")
+        gini_index <- 1 - simpson_index  # Gini is 1 - Simpson
+        gini_index
+      } else {
+        NA
+      }
+    } else {
+      NA
+    }
+  })
+}
+
+# Function to calculate Shannon diversity by Position for each PatientID
+calculate_diversity_by_position <- function(df, positions) {
+  df %>%
+    group_by(PatientID) %>%
+    do({
+      patient_data <- .$CDR3
+      patient_diversity <- calculate_shannon_diversity(patient_data, positions)
+      data.frame(Position = as.factor(1:length(patient_diversity)), Shannon = patient_diversity)
+    }) %>%
+    ungroup() %>%
+    unnest(cols = c(Shannon))
+}
+
+# Define severity categories
+base_severity <- list(
+  No = c(4, 8),
+  Mild = c(1),
+  Severe = c(2, 7, 9)
+)
+
+# Initialize data frame to store results
+shannon_df <- data.frame(Position = integer(), Severity = character(), Shannon = numeric(), stringsAsFactors = FALSE)
+
+# Loop through each severity category
+for (severity in names(base_severity)) {
+  bases <- base_severity[[severity]]
+  
+  for (base in bases) {
+    # Extract data for the current base and severity
+    df <- dt_b[[base]]
+    
+    # Calculate Shannon diversity for each Position by PatientID
+    max_length <- max(nchar(df$CDR3))  # Ensure we use the maximum length for positions
+    diversity_by_position <- calculate_diversity_by_position(df, 1:max_length)
+    
+    # Add severity label
+    diversity_by_position$Severity <- severity
+    
+    # Combine results
+    shannon_df <- rbind(shannon_df, diversity_by_position)
+  }
+}
+
+# Create a combined dataset for plotting
+shannon_long <- shannon_df
+shannon_long$Severity <- factor(shannon_long$Severity, levels = c("Severe", "Mild", "No"))
+
+# Plot
+plot <- ggplot(shannon_long, aes(x = Position, y = Shannon, fill = Severity)) +
+  geom_boxplot() +
+  # geom_jitter(aes(color = Severity), width = 0.2, size = 2, alpha = 0.7) +
+  # geom_beeswarm() +
+  labs(title = "Shannon Diversity by Patient ID",
+       x = "Position",
+       y = "Shannon's Diversity Index",
+       fill = "Severity") +
+  theme_pubr() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  theme(
+    plot.title = element_text(size = 28, face = "bold", hjust = 0.5),    # Title size
+    axis.title.x = element_text(size = 24),                        # Removes X-axis title
+    axis.title.y = element_text(size = 24),                # Y-axis label size
+    axis.text = element_text(size = 12),                   # Axis tick labels size
+    legend.text = element_text(size = 15),                 # Legend text size
+    legend.title = element_text(size = 15)                 # Legend title size
+  )
+  
+print(plot)
+ggsave(filename = "/Users/jessie/Downloads/shannon_diversity_plot.png", plot = plot, width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+#length for basis 
+
+length_severe <- c(nchar(dt_b[[2]]$CDR3), nchar(dt_b[[7]]$CDR3), nchar(dt_b[[9]]$CDR3))
+length_mild <- nchar(dt_b[[1]]$CDR3)
+length_no <- c(nchar(dt_b[[4]]$CDR3), nchar(dt_b[[8]]$CDR3))
+
+# Combine all lengths into a single data frame
+lengths <- data.frame(
+  length = c(length_severe, length_mild, length_no),
+  Basis = factor(rep(c("Severe", "Mild", "No"), 
+                    times = c(length(length_severe), length(length_mild), length(length_no))))
+)
+
+# Perform pairwise Wilcoxon test
+pairwise.wilcox.test(lengths$length, lengths$Basis, p.adjust.method = "holm")
+
+lengths$Basis <- factor(lengths$Basis, levels = c("Severe", "Mild", "No"))
+
+p <- ggplot(lengths, aes(x = Basis, y = length, fill = Basis)) +
+  geom_boxplot() +
+  labs(title = "CDR3 Lengths by Basis Severity",
+       x = "Basis",
+       y = "CDR3 Length") +
+  theme_pubr() +
+  scale_fill_manual(values = c("Severe" = "#B85000", "Mild" = "#005A8F", "No" = "#09BB8C")) +
+  stat_compare_means(
+    method = "wilcox.test", 
+    comparisons = list(c("Severe", "Mild"), c("Severe", "No"), c("Mild", "No")),  # Compare groups
+    label = "p.signif",                          # Show significance stars
+    p.adjust.method = "holm"                     # Apply Holm correction
+  )+
+  theme(
+    plot.title = element_text(size = 28, face = "bold", hjust = 0.5),    # Title size
+    axis.title.x = element_text(size = 24),                        # Removes X-axis title
+    axis.title.y = element_text(size = 24),                # Y-axis label size
+    axis.text = element_text(size = 20),                   # Axis tick labels size
+    legend.text = element_text(size = 15),                 # Legend text size
+    legend.title = element_text(size = 15)                 # Legend title size
+  )
+
+# Save the plot to a file with 300 DPI
+ggsave("/Users/jessie/Downloads/Basis_Length.png", plot = p, dpi = 300, width = 8, height = 6)
+
+#severe vs mild+no
+
+# Combine "Severe" and "Mild" into one group called "Severe/Mild"
+lengths <- lengths %>%
+  mutate(Group = ifelse(Basis %in% c("Severe", "Mild"), "Severe/Mild", "No"))
+
+# Reorder the new groups for plotting
+lengths$Group <- factor(lengths$Group, levels = c("Severe/Mild", "No"))
+
+# Perform the Wilcoxon test for the new groups
+p <- ggplot(lengths, aes(x = Group, y = length, fill = Group)) +
+  geom_boxplot() +
+  labs(title = "CDR3 Lengths: Severe/Mild vs No",
+       x = "Group",
+       y = "CDR3 Length") +
+  theme_pubr() +
+  scale_fill_manual(values = c("Severe/Mild" = "#659116", "No" = "#09BB8C")) +
+  stat_compare_means(
+    method = "wilcox.test", 
+    comparisons = list(c("Severe/Mild", "No")),  # Comparing Severe/Mild vs No
+    label = "p.signif",                          # Show significance stars
+    p.adjust.method = "holm"                     # Apply Holm correction
+  )+
+  theme(
+    plot.title = element_text(size = 28, face = "bold", hjust = 0.5),    # Title size
+    axis.title.x = element_text(size = 24),                        # Removes X-axis title
+    axis.title.y = element_text(size = 24),                # Y-axis label size
+    axis.text = element_text(size = 20),                   # Axis tick labels size
+    legend.text = element_text(size = 15),                 # Legend text size
+    legend.title = element_text(size = 15)                 # Legend title size
+  )
+
+# Save the plot to a file with 300 DPI
+ggsave("/Users/jessie/Downloads/Basis_Lengths_Severe_Mild_vs_No.png", plot = p, dpi = 300, width = 8, height = 6)
+
+#severe vs mild+no
+# Combine "Severe" and "Mild" into one group called "Severe/Mild"
+lengths <- lengths %>%
+  mutate(Group = ifelse(Basis %in% c("No", "Mild"), "Mild/No", "Severe"))
+
+# Reorder the new groups for plotting
+lengths$Group <- factor(lengths$Group, levels = c("Severe", "Mild/No"))
+
+# Perform the Wilcoxon test for the new groups
+pairwise.wilcox.test(lengths$length, lengths$Group, p.adjust.method = "holm")
+
+lengths$Group <- factor(
+  lengths$Group,
+  levels = c("Mild/No", "Severe") # Desired order
+)
+
+# Create the updated boxplot
+p <- ggplot(lengths, aes(x = Group, y = length, fill = Group)) +
+  geom_boxplot() +
+  labs(title = "CDR3 Lengths: Severe vs Mild/No",
+       x = "Group",
+       y = "CDR3 Length") +
+  theme_pubr() +
+  scale_fill_manual(values = c("Severe" = "#B85000", "Mild/No" = "#058B8E")) +
+  stat_compare_means(
+    method = "wilcox.test", 
+    comparisons = list(c("Severe", "Mild/No")),  # Comparing Severe vs Mild/No
+    label = "p.signif",                          # Show significance stars
+    p.adjust.method = "holm",
+    size = 8,
+    vjust = -0.5  # Move significance label upwards
+  ) +
+  coord_cartesian(ylim = c(min(lengths$length), max(lengths$length) * 1.1)) +  # Shorten figure
+  theme(
+    plot.title = element_text(size = 28, hjust = 0.5),    # Title size
+    axis.title.x = element_text(size = 28),                              # X-axis title size
+    axis.title.y = element_text(size = 28),                              # Y-axis label size
+    axis.text = element_text(size = 20),                                 # Axis tick labels size
+    legend.text = element_text(size = 15),                               # Legend text size
+    legend.title = element_text(size = 15)                               # Legend title size
+  )             # Legend title size
+
+# Save the plot to a file with 300 DPI
+ggsave("/Users/jessie/Downloads/Basis_Lengths_Severe_vs_Mild_No.png", plot = p, dpi = 300, width = 8, height = 6)
+
+```
