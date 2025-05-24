@@ -1,0 +1,2253 @@
+#### GVHD FIGURES
+
+```{r}
+gc() 
+rm(list = ls()) #Remove variables from previous runs
+```
+
+```{r}
+# install.packages("devtools")
+# devtools::install_github("alexandermxu/SPANTCR")
+# install.packages("VennDiagram")
+# install.packages("ggseqlogo")
+# install.packages("ggpubr")
+# library("readxl", lib.loc = '/home/jz3553/anaconda3/envs/r-env/lib/R/library')
+# install.packages("data.table")
+```
+
+```{r}
+library(SPANTCR)
+library(data.table)
+library(ggplot2)
+library(VennDiagram)
+library(ggseqlogo)
+library(ggpubr)
+library(readxl)
+library(cdr3tools)
+library(dplyr)
+library(data.table)
+library(Biostrings) 
+library(future.apply)
+library(parallel)
+library(tidyr)
+library(extrafont)
+# Setup parallel processing
+plan(multisession, workers = parallel::detectCores() - 1)  # Use all but one core
+```
+
+```{r}
+allclones <- fread("/home/jz3553/data/AllClones_all.csv")
+head(allclones)
+dim(allclones)
+names(allclones)
+```
+
+#### PTCY Analysis
+
+
+##### Identification of surviving vs disappearing clones
+
+```{r}
+alloreactive_clones <- allclones %>% filter(type == "allo")
+alloreactive_clones %>%
+  distinct(PatientID, cdr3_amino_acid, v_resolved, j_resolved) %>%
+  nrow()
+```
+
+```{r}
+alloreactive_clones <- allclones %>% filter(type == "allo")
+alloreactive_clones <- alloreactive_clones %>% 
+  mutate(timepoint_numeric = as.numeric(timepoint)) # Ensure the timepoint coln is numeric
+
+# Subset data to have timepoints past the PTCY treatment (day 2/3)
+next_timepoints <- alloreactive_clones %>%
+  filter(!is.na(timepoint_numeric), timepoint_numeric > 3) %>%
+  group_by(PatientID) %>%
+  summarize(next_timepoint = min(timepoint_numeric, na.rm = TRUE))
+next_tp_data <- alloreactive_clones %>%
+  inner_join(next_timepoints, by = "PatientID") %>%
+  filter(timepoint_numeric == next_timepoint) %>%
+  distinct(PatientID, cdr3_amino_acid, v_resolved, j_resolved, .keep_all = TRUE)
+
+# Find clones present during PTCY treatment (day 2/3)
+clones_day2_3 <- alloreactive_clones %>%
+  filter(timepoint_numeric %in% c(2, 3), frequency > 0) %>%
+  distinct(PatientID, cdr3_amino_acid, v_resolved, j_resolved) %>%
+  mutate(status = "disappeared") # set default status to disappeared
+
+# For all clones with their next time point having a nonzero frequency, classify as survived
+clone_classification <- clones_day2_3 %>%
+  left_join(next_tp_data, by = c("PatientID", "cdr3_amino_acid", "v_resolved", "j_resolved")) %>%
+  mutate(status = ifelse(!is.na(frequency) & frequency > 0, "survived", "disappeared")) %>%
+  select(PatientID, cdr3_amino_acid, v_resolved, j_resolved, status)
+
+# Summary
+survival_by_patient <- clone_classification %>%
+  group_by(PatientID) %>%
+  summarize(
+    total_clones = n(),
+    survived_clones = sum(status == "survived"),
+    survival_rate = round(survived_clones / total_clones * 100, 2)
+  )
+print(survival_by_patient)
+```
+
+```{r}
+# Check the number of unique alloreactive clones with frequency > 0 
+alloreactive_clones %>%
+  filter(frequency > 0) %>%
+  group_by(timepoint_numeric) %>%
+  summarize(n_clones = n_distinct(paste(PatientID, cdr3_amino_acid, v_resolved, j_resolved)))
+clones_day2_3_check <- alloreactive_clones %>%
+  filter(timepoint_numeric %in% c(2, 3), frequency > 0) %>%
+  distinct(PatientID, cdr3_amino_acid, v_resolved, j_resolved)
+nrow(clones_day2_3_check)
+```
+
+```{r}
+# Check number of unique clones per patient pre-PTCY and at the next time point
+clones_day2_3_counts <- alloreactive_clones %>%
+  filter(timepoint_numeric %in% c(2, 3), frequency > 0) %>%
+  distinct(PatientID, cdr3_amino_acid, v_resolved, j_resolved) %>%
+  group_by(PatientID) %>%
+  summarize(n_clones_day2_3 = n())
+
+next_timepoints <- alloreactive_clones %>%
+  filter(timepoint_numeric > 3) %>%
+  group_by(PatientID) %>%
+  summarize(next_timepoint = min(timepoint_numeric, na.rm = TRUE))
+
+clones_next_tp_counts <- alloreactive_clones %>%
+  inner_join(next_timepoints, by = "PatientID") %>%
+  filter(timepoint_numeric == next_timepoint, frequency > 0) %>%
+  distinct(PatientID, cdr3_amino_acid, v_resolved, j_resolved) %>%
+  group_by(PatientID) %>%
+  summarize(n_clones_next_tp = n())
+
+clone_counts_summary <- full_join(clones_day2_3_counts, clones_next_tp_counts, by = "PatientID") %>%
+  replace_na(list(n_clones_day2_3 = 0, n_clones_next_tp = 0))
+print(clone_counts_summary)
+```
+
+##### CDR3 lengths and hydrophobicity comparison between surviving and disappearing clones
+
+```{r}
+# Functions for hydrophobicity calculations
+calculate_hydrophobicity <- function(cdr3_string, hydrophobicity_chart) {
+    cdr3_string <- as.character(cdr3_string)
+    hydrophobicity_sum <- 0
+    num_amino_acids <- 0
+    
+    for (amino_acid in strsplit(cdr3_string, "")[[1]]) {
+        hydrophobicity_value <- hydrophobicity_chart$Hydrophobicity[hydrophobicity_chart$AA == amino_acid]
+        
+        if (length(hydrophobicity_value) > 0) {
+          hydrophobicity_sum <- hydrophobicity_sum + hydrophobicity_value
+          num_amino_acids <- num_amino_acids + 1
+        }
+    }
+    
+    if (num_amino_acids > 0) {
+        hydrophobicity_mean <- hydrophobicity_sum / num_amino_acids
+    } else {
+        hydrophobicity_mean <- NA
+    }
+    
+    return(hydrophobicity_mean)
+}
+
+calculate_hydrophobicity_for_positions <- function(string, hydrophobicity_chart) {
+    string <- as.character(string)
+
+    if (nchar(string) < 13) {
+        return(NA)
+    } else {
+        substring_to_use <- substring(string, 5, 13)
+        return(calculate_hydrophobicity(substring_to_use, hydrophobicity_chart))
+    }
+}
+```
+
+```{r}
+# Calculate CDR3 length
+clone_classification$cdr3_length <- nchar(clone_classification$cdr3_amino_acid)
+hydrophobicity_chart <- read.csv("/home/jz3553/data/MLR_jesse_data/HydrophobicityScale.csv")
+
+# Calculate hydrophobicity values
+clone_classification$full_hydrophobicity <- sapply(
+  clone_classification$cdr3_amino_acid, 
+  calculate_hydrophobicity, 
+  hydrophobicity_chart = hydrophobicity_chart
+)
+
+clone_classification$pos_5_13_hydrophobicity <- sapply(
+  clone_classification$cdr3_amino_acid, 
+  calculate_hydrophobicity_for_positions, 
+  hydrophobicity_chart = hydrophobicity_chart
+)
+
+# Compare properties between survived and disappeared clones
+# CDR3 Length comparison
+cat("\nCDR3 Length Comparison:\n")
+length_by_status <- aggregate(cdr3_length ~ status, data = clone_classification, 
+                             FUN = function(x) c(mean = mean(x), median = median(x), sd = sd(x)))
+print(length_by_status)
+
+# Full hydrophobicity comparison
+cat("\nFull CDR3 Hydrophobicity Comparison:\n")
+full_hydro_by_status <- aggregate(full_hydrophobicity ~ status, data = clone_classification, 
+                                 FUN = function(x) c(mean = mean(x, na.rm = TRUE), 
+                                                    median = median(x, na.rm = TRUE), 
+                                                    sd = sd(x, na.rm = TRUE)))
+print(full_hydro_by_status)
+
+# Position 5-13 hydrophobicity comparison
+cat("\nPosition 5-13 Hydrophobicity Comparison:\n")
+pos_hydro_by_status <- aggregate(pos_5_13_hydrophobicity ~ status, 
+                               data = clone_classification[!is.na(clone_classification$pos_5_13_hydrophobicity), ], 
+                               FUN = function(x) c(mean = mean(x, na.rm = TRUE), 
+                                                  median = median(x, na.rm = TRUE), 
+                                                  sd = sd(x, na.rm = TRUE)))
+print(pos_hydro_by_status)
+```
+
+```{r}
+# Statistical tests
+
+# CDR3 length test
+length_test <- wilcox.test(cdr3_length ~ status, data = clone_classification)
+cat("\nCDR3 Length Wilcoxon test p-value:", length_test$p.value, "\n")
+# Full hydrophobicity test
+hydro_test <- wilcox.test(full_hydrophobicity ~ status, data = clone_classification)
+cat("Full CDR3 Hydrophobicity Wilcoxon test p-value:", hydro_test$p.value, "\n")
+# Position 5-13 hydrophobicity test
+pos_hydro_test <- wilcox.test(pos_5_13_hydrophobicity ~ status, 
+                            data = clone_classification[!is.na(clone_classification$pos_5_13_hydrophobicity), ])
+cat("Position 5-13 Hydrophobicity Wilcoxon test p-value:", pos_hydro_test$p.value, "\n")
+
+# CDR3 Length visualization
+p_length <- ggplot(clone_classification, aes(x = status, y = cdr3_length, fill = status)) +
+  geom_violin(width = 0.4, alpha = 0.7) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, color = "black", lwd = 1.2) +
+  labs(
+    title = "CDR3 Length by Clone Survival Status",
+    x = "Survival Status after PTCy",
+    y = "CDR3 Length (amino acids)"
+  ) +
+  theme_pubr() +
+  scale_fill_manual(values = c(
+    "survived" = "#005A8F",
+    "disappeared" = "#B85000"
+  )) +
+  stat_compare_means(
+    method = "wilcox.test",
+    label = "p.signif",
+    size = 6
+  ) +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0.5),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.position = "bottom"
+  )
+
+# Full hydrophobicity visualization
+p_hydro_full <- ggplot(clone_classification, aes(x = status, y = full_hydrophobicity, fill = status)) +
+  geom_violin(width = 0.4, alpha = 0.7) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, color = "black", lwd = 1.2) +
+  labs(
+    title = "Full CDR3 Hydrophobicity by Clone Survival Status",
+    x = "Survival Status after PTCy",
+    y = "Hydrophobicity Score"
+  ) +
+  theme_pubr() +
+  scale_fill_manual(values = c(
+    "survived" = "#005A8F",
+    "disappeared" = "#B85000"
+  )) +
+  stat_compare_means(
+    method = "wilcox.test",
+    label = "p.signif",
+    size = 6
+  ) +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0.5),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.position = "bottom"
+  )
+
+# Position 5-13 hydrophobicity visualization
+p_hydro_pos <- ggplot(clone_classification[!is.na(clone_classification$pos_5_13_hydrophobicity), ], 
+                     aes(x = status, y = pos_5_13_hydrophobicity, fill = status)) +
+  geom_violin(width = 0.4, alpha = 0.7) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, color = "black", lwd = 1.2) +
+  labs(
+    title = "CDR3 Position 5-13 Hydrophobicity by Clone Survival Status",
+    x = "Survival Status after PTCy",
+    y = "Hydrophobicity Score (pos 5-13)"
+  ) +
+  theme_pubr() +
+  scale_fill_manual(values = c(
+    "survived" = "#005A8F",
+    "disappeared" = "#B85000"
+  )) +
+  stat_compare_means(
+    method = "wilcox.test",
+    label = "p.signif",
+    size = 6
+  ) +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0.5),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.position = "bottom"
+  )
+
+print(p_length)
+print(p_hydro_full)
+print(p_hydro_pos)
+
+# Summary table with mean values and p-values
+summary_table <- data.frame(
+  Property = c("CDR3 Length", "Full Hydrophobicity", "Position 5-13 Hydrophobicity"),
+  Survived_Mean = c(
+    mean(clone_classification$cdr3_length[clone_classification$status == "survived"]),
+    mean(clone_classification$full_hydrophobicity[clone_classification$status == "survived"], na.rm = TRUE),
+    mean(clone_classification$pos_5_13_hydrophobicity[clone_classification$status == "survived"], na.rm = TRUE)
+  ),
+  Disappeared_Mean = c(
+    mean(clone_classification$cdr3_length[clone_classification$status == "disappeared"]),
+    mean(clone_classification$full_hydrophobicity[clone_classification$status == "disappeared"], na.rm = TRUE),
+    mean(clone_classification$pos_5_13_hydrophobicity[clone_classification$status == "disappeared"], na.rm = TRUE)
+  ),
+  P_Value = c(
+    length_test$p.value,
+    hydro_test$p.value,
+    pos_hydro_test$p.value
+  )
+)
+
+# Format the table with rounded values for readability
+summary_table$Survived_Mean <- round(summary_table$Survived_Mean, 3)
+summary_table$Disappeared_Mean <- round(summary_table$Disappeared_Mean, 3)
+summary_table$P_Value <- format.pval(summary_table$P_Value, digits = 3)
+
+# Print the summary table
+print(summary_table)
+```
+
+```{r}
+# Examine mean hydrophobicity
+patient_means <- clone_classification %>%
+  group_by(PatientID, status) %>%
+  summarize(
+    mean_cdr3_length = mean(cdr3_length, na.rm = TRUE),
+    mean_hydrophobicity = mean(pos_5_13_hydrophobicity, na.rm = TRUE)
+  )
+print(head(patient_means))
+```
+
+```{r}
+# Visualize per patient 
+patient_means <- clone_classification %>%
+  group_by(PatientID, status) %>%
+  summarize(
+    mean_cdr3_length = mean(cdr3_length, na.rm = TRUE),
+    mean_hydrophobicity = mean(pos_5_13_hydrophobicity, na.rm = TRUE),
+    .groups = 'drop'
+  )
+print(head(patient_means))
+
+length_data <- data.frame()
+hydro_data <- data.frame()
+
+# Iterate through patients 
+patients <- unique(patient_means$PatientID)
+for (patient in patients) {
+  patient_data <- patient_means[patient_means$PatientID == patient, ]
+  if (nrow(patient_data) == 2) {
+    surv_idx <- which(patient_data$status == "survived")
+    disapp_idx <- which(patient_data$status == "disappeared")
+      
+    if (length(surv_idx) > 0 && length(disapp_idx) > 0) {
+      # Add to length 
+      length_data <- rbind(length_data, data.frame(
+        PatientID = patient,
+        status = "survived",
+        length = patient_data$mean_cdr3_length[surv_idx]
+      ))
+      length_data <- rbind(length_data, data.frame(
+        PatientID = patient,
+        status = "disappeared",
+        length = patient_data$mean_cdr3_length[disapp_idx]
+      ))
+      
+      # Add to hydro 
+      if (!is.na(patient_data$mean_hydrophobicity[surv_idx]) && 
+          !is.na(patient_data$mean_hydrophobicity[disapp_idx])) {
+        
+        hydro_data <- rbind(hydro_data, data.frame(
+          PatientID = patient,
+          status = "survived",
+          hydro = patient_data$mean_hydrophobicity[surv_idx]
+        ))
+        
+        hydro_data <- rbind(hydro_data, data.frame(
+          PatientID = patient,
+          status = "disappeared",
+          hydro = patient_data$mean_hydrophobicity[disapp_idx]
+        ))
+      }
+    }
+  }
+}
+
+# Run paired tests for each patient
+length_pvalues <- c()
+hydro_pvalues <- c()
+for (patient in unique(length_data$PatientID)) {
+  # Get clones 
+  patient_clones <- clone_classification[clone_classification$PatientID == patient,]
+  # Run test on CDR3 length
+  length_test <- wilcox.test(cdr3_length ~ status, data = patient_clones)
+  length_pvalues <- c(length_pvalues, c(patient, length_test$p.value))
+  # Run test on hydrophobicity 
+  if (patient %in% unique(hydro_data$PatientID)) {
+    patient_clones_hydro <- patient_clones[!is.na(patient_clones$pos_5_13_hydrophobicity),]
+    if (nrow(patient_clones_hydro) > 0) {
+      hydro_test <- wilcox.test(pos_5_13_hydrophobicity ~ status, data = patient_clones_hydro)
+      hydro_pvalues <- c(hydro_pvalues, c(patient, hydro_test$p.value))
+    }
+  }
+}
+
+# Plot
+n_patients <- length(unique(length_data$PatientID))
+patient_colors <- colorRampPalette(c("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", 
+                                     "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", 
+                                     "#bcbd22", "#17becf"))(n_patients)
+
+shape_values <- c("survived" = 16, "disappeared" = 17)  # Filled circle and triangle
+p_length <- ggplot(length_data, aes(x = status, y = length, group = PatientID, color = PatientID)) +
+  geom_line(linewidth = 1) +
+  geom_point(aes(shape = status), size = 4) +
+  labs(
+    title = "CDR3 Length by Clone Survival Status",
+    subtitle = "Patient-specific changes after PTCy",
+    x = "Survival Status",
+    y = "Mean CDR3 Length (amino acids)"
+  ) +
+  theme_pubr() +
+  scale_color_manual(values = setNames(patient_colors, unique(length_data$PatientID))) +
+  scale_shape_manual(values = shape_values) +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.position = "right",
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10)
+  )
+
+p_hydro <- ggplot(hydro_data, aes(x = status, y = hydro, group = PatientID, color = PatientID)) +
+  geom_line(linewidth = 1) +
+  geom_point(aes(shape = status), size = 4) +
+  labs(
+    title = "CDR3 Position 5-13 Hydrophobicity by Clone Survival Status",
+    subtitle = "Patient-specific changes after PTCy",
+    x = "Survival Status",
+    y = "Mean Hydrophobicity Score (pos 5-13)"
+  ) +
+  theme_pubr() +
+  scale_color_manual(values = setNames(patient_colors, unique(hydro_data$PatientID))) +
+  scale_shape_manual(values = shape_values) +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.position = "right",
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10)
+  )
+
+print(p_length)
+print(p_hydro)
+
+# ggsave("cdr3_length_comparison_by_patient_colored.png", plot = p_length, width = 10, height = 7, dpi = 300)
+# ggsave("hydrophobicity_comparison_by_patient_colored.png", plot = p_hydro, width = 10, height = 7, dpi = 300)
+
+cat("\nCDR3 Length p-values by patient:\n")
+length_pvalue_df <- matrix(length_pvalues, ncol = 2, byrow = TRUE)
+colnames(length_pvalue_df) <- c("PatientID", "p-value")
+print(length_pvalue_df)
+
+cat("\nHydrophobicity p-values by patient:\n")
+hydro_pvalue_df <- matrix(hydro_pvalues, ncol = 2, byrow = TRUE)
+colnames(hydro_pvalue_df) <- c("PatientID", "p-value")
+print(hydro_pvalue_df)
+```
+
+```{r}
+alloreactive_clones %>%
+  distinct(PatientID, cdr3_amino_acid, v_resolved, j_resolved) %>%
+  nrow()
+```
+
+```{r}
+alloreactive_clones <- allclones %>% filter(type == "allo")
+
+# First, ensure your timepoint_numeric column is correctly converted:
+alloreactive_clones <- alloreactive_clones %>% 
+  mutate(timepoint_numeric = as.numeric(timepoint))
+
+# Step 2: Find the next timepoint after PTCy (day 2 or 3) for each patient
+next_timepoints <- alloreactive_clones %>%
+  filter(!is.na(timepoint_numeric), timepoint_numeric > 3) %>%
+  group_by(PatientID) %>%
+  summarize(next_timepoint = min(timepoint_numeric, na.rm = TRUE))
+
+# Step 3: Find clones that existed at day 2/3 (frequency > 0)
+clones_day2_3 <- alloreactive_clones %>%
+  filter(timepoint_numeric %in% c(2, 3), frequency > 0) %>%
+  distinct(PatientID, cdr3_amino_acid, v_resolved, j_resolved) %>%
+  mutate(status = "disappeared") # default status is disappeared
+
+# Step 4: Join with next timepoint and check frequencies
+next_tp_data <- alloreactive_clones %>%
+  inner_join(next_timepoints, by = "PatientID") %>%
+  filter(timepoint_numeric == next_timepoint) %>%
+  distinct(PatientID, cdr3_amino_acid, v_resolved, j_resolved, .keep_all = TRUE)
+
+# Step 5: Classify clones - "survived" if frequency > 0 at next timepoint, otherwise "disappeared"
+clone_classification <- clones_day2_3 %>%
+  left_join(next_tp_data, by = c("PatientID", "cdr3_amino_acid", "v_resolved", "j_resolved")) %>%
+  mutate(status = ifelse(!is.na(frequency) & frequency > 0, "survived", "disappeared")) %>%
+  select(PatientID, cdr3_amino_acid, v_resolved, j_resolved, status)
+
+# Step 6: Summarize results by patient
+survival_by_patient <- clone_classification %>%
+  group_by(PatientID) %>%
+  summarize(
+    total_clones = n(),
+    survived_clones = sum(status == "survived"),
+    survival_rate = round(survived_clones / total_clones * 100, 2)
+  )
+
+# Print results
+print(survival_by_patient)
+```
+
+```{r}
+alloreactive_clones %>%
+  filter(frequency > 0) %>%
+  group_by(timepoint_numeric) %>%
+  summarize(n_clones = n_distinct(paste(PatientID, cdr3_amino_acid, v_resolved, j_resolved)))
+
+clones_day2_3_check <- alloreactive_clones %>%
+  filter(timepoint_numeric %in% c(2, 3), frequency > 0) %>%
+  distinct(PatientID, cdr3_amino_acid, v_resolved, j_resolved)
+
+nrow(clones_day2_3_check)
+```
+
+```{r}
+library(tidyr)
+
+# Clones at day 2 or 3
+clones_day2_3_counts <- alloreactive_clones %>%
+  filter(timepoint_numeric %in% c(2, 3), frequency > 0) %>%
+  distinct(PatientID, cdr3_amino_acid, v_resolved, j_resolved) %>%
+  group_by(PatientID) %>%
+  summarize(n_clones_day2_3 = n())
+
+# Get each patient's next timepoint after day 3
+next_timepoints <- alloreactive_clones %>%
+  filter(timepoint_numeric > 3) %>%
+  group_by(PatientID) %>%
+  summarize(next_timepoint = min(timepoint_numeric, na.rm = TRUE))
+
+# Clones at that next timepoint
+clones_next_tp_counts <- alloreactive_clones %>%
+  inner_join(next_timepoints, by = "PatientID") %>%
+  filter(timepoint_numeric == next_timepoint, frequency > 0) %>%
+  distinct(PatientID, cdr3_amino_acid, v_resolved, j_resolved) %>%
+  group_by(PatientID) %>%
+  summarize(n_clones_next_tp = n())
+
+# Join both summaries
+clone_counts_summary <- full_join(clones_day2_3_counts, clones_next_tp_counts, by = "PatientID") %>%
+  replace_na(list(n_clones_day2_3 = 0, n_clones_next_tp = 0))
+
+# View result
+print(clone_counts_summary)
+```
+
+```{r}
+# Calculate CDR3 length
+clone_classification$cdr3_length <- nchar(clone_classification$cdr3_amino_acid)
+
+# Load hydrophobicity chart
+hydrophobicity_chart <- read.csv("/home/jz3553/data/MLR_jesse_data/HydrophobicityScale.csv")
+
+# Functions for hydrophobicity calculations
+calculate_hydrophobicity <- function(cdr3_string, hydrophobicity_chart) {
+    cdr3_string <- as.character(cdr3_string)
+    hydrophobicity_sum <- 0
+    num_amino_acids <- 0
+    
+    for (amino_acid in strsplit(cdr3_string, "")[[1]]) {
+        hydrophobicity_value <- hydrophobicity_chart$Hydrophobicity[hydrophobicity_chart$AA == amino_acid]
+        
+        if (length(hydrophobicity_value) > 0) {
+          hydrophobicity_sum <- hydrophobicity_sum + hydrophobicity_value
+          num_amino_acids <- num_amino_acids + 1
+        }
+    }
+    
+    if (num_amino_acids > 0) {
+        hydrophobicity_mean <- hydrophobicity_sum / num_amino_acids
+    } else {
+        hydrophobicity_mean <- NA
+    }
+    
+    return(hydrophobicity_mean)
+}
+
+calculate_hydrophobicity_for_positions <- function(string, hydrophobicity_chart) {
+    string <- as.character(string)
+
+    if (nchar(string) < 13) {
+        return(NA)
+    } else {
+        substring_to_use <- substring(string, 5, 13)
+        return(calculate_hydrophobicity(substring_to_use, hydrophobicity_chart))
+    }
+}
+
+# Calculate hydrophobicity values
+clone_classification$full_hydrophobicity <- sapply(
+  clone_classification$cdr3_amino_acid, 
+  calculate_hydrophobicity, 
+  hydrophobicity_chart = hydrophobicity_chart
+)
+
+clone_classification$pos_5_13_hydrophobicity <- sapply(
+  clone_classification$cdr3_amino_acid, 
+  calculate_hydrophobicity_for_positions, 
+  hydrophobicity_chart = hydrophobicity_chart
+)
+
+# Compare properties between survived and disappeared clones
+# CDR3 Length comparison
+cat("\nCDR3 Length Comparison:\n")
+length_by_status <- aggregate(cdr3_length ~ status, data = clone_classification, 
+                             FUN = function(x) c(mean = mean(x), median = median(x), sd = sd(x)))
+print(length_by_status)
+
+# Full hydrophobicity comparison
+cat("\nFull CDR3 Hydrophobicity Comparison:\n")
+full_hydro_by_status <- aggregate(full_hydrophobicity ~ status, data = clone_classification, 
+                                 FUN = function(x) c(mean = mean(x, na.rm = TRUE), 
+                                                    median = median(x, na.rm = TRUE), 
+                                                    sd = sd(x, na.rm = TRUE)))
+print(full_hydro_by_status)
+
+# Position 5-13 hydrophobicity comparison
+cat("\nPosition 5-13 Hydrophobicity Comparison:\n")
+pos_hydro_by_status <- aggregate(pos_5_13_hydrophobicity ~ status, 
+                               data = clone_classification[!is.na(clone_classification$pos_5_13_hydrophobicity), ], 
+                               FUN = function(x) c(mean = mean(x, na.rm = TRUE), 
+                                                  median = median(x, na.rm = TRUE), 
+                                                  sd = sd(x, na.rm = TRUE)))
+print(pos_hydro_by_status)
+
+# Statistical tests
+# CDR3 length test
+length_test <- wilcox.test(cdr3_length ~ status, data = clone_classification)
+cat("\nCDR3 Length Wilcoxon test p-value:", length_test$p.value, "\n")
+
+# Full hydrophobicity test
+hydro_test <- wilcox.test(full_hydrophobicity ~ status, data = clone_classification)
+cat("Full CDR3 Hydrophobicity Wilcoxon test p-value:", hydro_test$p.value, "\n")
+
+# Position 5-13 hydrophobicity test
+pos_hydro_test <- wilcox.test(pos_5_13_hydrophobicity ~ status, 
+                            data = clone_classification[!is.na(clone_classification$pos_5_13_hydrophobicity), ])
+cat("Position 5-13 Hydrophobicity Wilcoxon test p-value:", pos_hydro_test$p.value, "\n")
+
+# Create visualizations
+library(ggplot2)
+library(ggpubr)
+
+# CDR3 Length visualization
+p_length <- ggplot(clone_classification, aes(x = status, y = cdr3_length, fill = status)) +
+  geom_violin(width = 0.4, alpha = 0.7) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, color = "black", lwd = 1.2) +
+  labs(
+    title = "CDR3 Length by Clone Survival Status",
+    x = "Survival Status after PTCy",
+    y = "CDR3 Length (amino acids)"
+  ) +
+  theme_pubr() +
+  scale_fill_manual(values = c(
+    "survived" = "#005A8F",
+    "disappeared" = "#B85000"
+  )) +
+  stat_compare_means(
+    method = "wilcox.test",
+    label = "p.signif",
+    size = 6
+  ) +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0.5),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.position = "bottom"
+  )
+
+# Full hydrophobicity visualization
+p_hydro_full <- ggplot(clone_classification, aes(x = status, y = full_hydrophobicity, fill = status)) +
+  geom_violin(width = 0.4, alpha = 0.7) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, color = "black", lwd = 1.2) +
+  labs(
+    title = "Full CDR3 Hydrophobicity by Clone Survival Status",
+    x = "Survival Status after PTCy",
+    y = "Hydrophobicity Score"
+  ) +
+  theme_pubr() +
+  scale_fill_manual(values = c(
+    "survived" = "#005A8F",
+    "disappeared" = "#B85000"
+  )) +
+  stat_compare_means(
+    method = "wilcox.test",
+    label = "p.signif",
+    size = 6
+  ) +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0.5),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.position = "bottom"
+  )
+
+print(p_length)
+print(p_hydro_full)
+
+# Summary table with mean values and p-values
+summary_table <- data.frame(
+  Property = c("CDR3 Length", "Full Hydrophobicity", "Position 5-13 Hydrophobicity"),
+  Survived_Mean = c(
+    mean(clone_classification$cdr3_length[clone_classification$status == "survived"]),
+    mean(clone_classification$full_hydrophobicity[clone_classification$status == "survived"], na.rm = TRUE),
+    mean(clone_classification$pos_5_13_hydrophobicity[clone_classification$status == "survived"], na.rm = TRUE)
+  ),
+  Disappeared_Mean = c(
+    mean(clone_classification$cdr3_length[clone_classification$status == "disappeared"]),
+    mean(clone_classification$full_hydrophobicity[clone_classification$status == "disappeared"], na.rm = TRUE),
+    mean(clone_classification$pos_5_13_hydrophobicity[clone_classification$status == "disappeared"], na.rm = TRUE)
+  ),
+  P_Value = c(
+    length_test$p.value,
+    hydro_test$p.value,
+    pos_hydro_test$p.value
+  )
+)
+
+# Format the table with rounded values for readability
+summary_table$Survived_Mean <- round(summary_table$Survived_Mean, 3)
+summary_table$Disappeared_Mean <- round(summary_table$Disappeared_Mean, 3)
+summary_table$P_Value <- format.pval(summary_table$P_Value, digits = 3)
+
+# Print the summary table
+print(summary_table)
+```
+
+```{r}
+# Position 5-13 hydrophobicity visualization
+p_hydro_pos <- ggplot(clone_classification[!is.na(clone_classification$pos_5_13_hydrophobicity), ], 
+                     aes(x = status, y = pos_5_13_hydrophobicity, fill = status)) +
+  geom_violin(width = 0.4, alpha = 0.7) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, color = "black", lwd = 1.2) +
+  labs(
+    title = "CDR3 Position 5-13 Hydrophobicity by Clone Survival Status",
+    x = "Survival Status after PTCy",
+    y = "Hydrophobicity Score (pos 5-13)"
+  ) +
+  theme_pubr() +
+  scale_fill_manual(values = c(
+    "survived" = "#005A8F",
+    "disappeared" = "#B85000"
+  )) +
+  stat_compare_means(
+    method = "wilcox.test",
+    label = "p.signif",
+    size = 6
+  ) +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0.5),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.position = "bottom"
+  )
+
+p_hydro_pos
+```
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(ggpubr)
+library(dplyr)
+
+# Step 1: Calculate mean values for each patient and status group
+# Make sure to check the actual column names in your dataframe
+patient_means <- clone_classification %>%
+  group_by(PatientID, status) %>%
+  summarize(
+    mean_cdr3_length = mean(cdr3_length, na.rm = TRUE),
+    mean_hydrophobicity = mean(pos_5_13_hydrophobicity, na.rm = TRUE)
+  )
+
+# Print the first few rows to verify structure
+print(head(patient_means))
+
+# Step 2: Create separate dataframes for plotting
+length_data <- data.frame()
+hydro_data <- data.frame()
+
+# Iterate through patients to create paired data for plotting
+patients <- unique(patient_means$PatientID)
+for (patient in patients) {
+  # Get data for this patient
+  patient_data <- patient_means[patient_means$PatientID == patient, ]
+  
+  # If patient has both status values
+  if (nrow(patient_data) == 2) {
+    # Extract values for survived and disappeared
+    surv_idx <- which(patient_data$status == "survived")
+    disapp_idx <- which(patient_data$status == "disappeared")
+    
+    if (length(surv_idx) > 0 && length(disapp_idx) > 0) {
+      # Add to length dataset
+      length_data <- rbind(length_data, data.frame(
+        PatientID = patient,
+        status = "survived",
+        length = patient_data$mean_cdr3_length[surv_idx]
+      ))
+      
+      length_data <- rbind(length_data, data.frame(
+        PatientID = patient,
+        status = "disappeared",
+        length = patient_data$mean_cdr3_length[disapp_idx]
+      ))
+      
+      # Add to hydro dataset if values are not NA
+      if (!is.na(patient_data$mean_hydrophobicity[surv_idx]) && 
+          !is.na(patient_data$mean_hydrophobicity[disapp_idx])) {
+        
+        hydro_data <- rbind(hydro_data, data.frame(
+          PatientID = patient,
+          status = "survived",
+          hydro = patient_data$mean_hydrophobicity[surv_idx]
+        ))
+        
+        hydro_data <- rbind(hydro_data, data.frame(
+          PatientID = patient,
+          status = "disappeared",
+          hydro = patient_data$mean_hydrophobicity[disapp_idx]
+        ))
+      }
+    }
+  }
+}
+
+# Print to verify we have data
+cat("Length data rows:", nrow(length_data), "\n")
+cat("Hydro data rows:", nrow(hydro_data), "\n")
+
+# 1. CDR3 Length visualization with patient lines
+p_length <- ggplot() +
+  # Add lines connecting points for each patient
+  geom_line(data = length_data, 
+            aes(x = status, y = length, group = PatientID), 
+            color = "gray", linewidth = 0.5) +
+  
+  # Add points for each patient
+  geom_point(data = length_data,
+             aes(x = status, y = length, color = status),
+             size = 3) +
+  
+  # Add boxplot of all data
+  geom_boxplot(data = clone_classification, 
+               aes(x = status, y = cdr3_length, fill = status),
+               alpha = 0.3, width = 0.5, outlier.shape = NA) +
+  
+  # Labels
+  labs(
+    title = "CDR3 Length by Clone Survival Status",
+    x = "Survival Status after PTCy",
+    y = "CDR3 Length (amino acids)"
+  ) +
+  theme_pubr() +
+  scale_fill_manual(values = c(
+    "survived" = "#005A8F",
+    "disappeared" = "#B85000"
+  )) +
+  scale_color_manual(values = c(
+    "survived" = "#005A8F",
+    "disappeared" = "#B85000"
+  )) +
+  stat_compare_means(
+    data = clone_classification, 
+    aes(x = status, y = cdr3_length),
+    method = "wilcox.test",
+    label = "p.signif",
+    size = 6
+  ) +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0.5),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.position = "bottom"
+  )
+
+# 2. Hydrophobicity visualization with patient lines
+p_hydro <- ggplot() +
+  # Add lines connecting points for each patient
+  geom_line(data = hydro_data, 
+            aes(x = status, y = hydro, group = PatientID), 
+            color = "gray", linewidth = 0.5) +
+  
+  # Add points for each patient
+  geom_point(data = hydro_data,
+             aes(x = status, y = hydro, color = status),
+             size = 3) +
+  
+  # Add boxplot of all data
+  geom_boxplot(data = clone_classification %>% filter(!is.na(pos_5_13_hydrophobicity)), 
+               aes(x = status, y = pos_5_13_hydrophobicity, fill = status),
+               alpha = 0.3, width = 0.5, outlier.shape = NA) +
+  
+  # Labels
+  labs(
+    title = "CDR3 Position 5-13 Hydrophobicity by Clone Survival Status",
+    x = "Survival Status after PTCy",
+    y = "Hydrophobicity Score (pos 5-13)"
+  ) +
+  theme_pubr() +
+  scale_fill_manual(values = c(
+    "survived" = "#005A8F",
+    "disappeared" = "#B85000"
+  )) +
+  scale_color_manual(values = c(
+    "survived" = "#005A8F",
+    "disappeared" = "#B85000"
+  )) +
+  stat_compare_means(
+    data = clone_classification %>% filter(!is.na(pos_5_13_hydrophobicity)), 
+    aes(x = status, y = pos_5_13_hydrophobicity),
+    method = "wilcox.test",
+    label = "p.signif",
+    size = 6
+  ) +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0.5),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.position = "bottom"
+  )
+
+# Display the plots
+print(p_length)
+print(p_hydro)
+
+# # Save the plots
+# ggsave("cdr3_length_comparison_by_patient.png", plot = p_length, width = 8, height = 6, dpi = 300)
+# ggsave("hydrophobicity_comparison_by_patient.png", plot = p_hydro, width = 8, height = 6, dpi = 300)
+```
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(ggpubr)
+library(dplyr)
+
+# Step 1: Calculate mean values for each patient and status group
+patient_means <- clone_classification %>%
+  group_by(PatientID, status) %>%
+  summarize(
+    mean_cdr3_length = mean(cdr3_length, na.rm = TRUE),
+    mean_hydrophobicity = mean(pos_5_13_hydrophobicity, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+# Print the first few rows to verify structure
+print(head(patient_means))
+
+# Step 2: Create separate dataframes for plotting
+length_data <- data.frame()
+hydro_data <- data.frame()
+
+# Iterate through patients to create paired data for plotting
+patients <- unique(patient_means$PatientID)
+for (patient in patients) {
+  # Get data for this patient
+  patient_data <- patient_means[patient_means$PatientID == patient, ]
+  
+  # If patient has both status values
+  if (nrow(patient_data) == 2) {
+    # Extract values for survived and disappeared
+    surv_idx <- which(patient_data$status == "survived")
+    disapp_idx <- which(patient_data$status == "disappeared")
+    
+    if (length(surv_idx) > 0 && length(disapp_idx) > 0) {
+      # Add to length dataset
+      length_data <- rbind(length_data, data.frame(
+        PatientID = patient,
+        status = "survived",
+        length = patient_data$mean_cdr3_length[surv_idx]
+      ))
+      
+      length_data <- rbind(length_data, data.frame(
+        PatientID = patient,
+        status = "disappeared",
+        length = patient_data$mean_cdr3_length[disapp_idx]
+      ))
+      
+      # Add to hydro dataset if values are not NA
+      if (!is.na(patient_data$mean_hydrophobicity[surv_idx]) && 
+          !is.na(patient_data$mean_hydrophobicity[disapp_idx])) {
+        
+        hydro_data <- rbind(hydro_data, data.frame(
+          PatientID = patient,
+          status = "survived",
+          hydro = patient_data$mean_hydrophobicity[surv_idx]
+        ))
+        
+        hydro_data <- rbind(hydro_data, data.frame(
+          PatientID = patient,
+          status = "disappeared",
+          hydro = patient_data$mean_hydrophobicity[disapp_idx]
+        ))
+      }
+    }
+  }
+}
+
+# Run paired tests for each patient
+length_pvalues <- c()
+hydro_pvalues <- c()
+
+# For each patient with both statuses, run a test on the individual clones
+for (patient in unique(length_data$PatientID)) {
+  # Get clones for this patient
+  patient_clones <- clone_classification[clone_classification$PatientID == patient,]
+  
+  # Run test on CDR3 length
+  length_test <- wilcox.test(cdr3_length ~ status, data = patient_clones)
+  length_pvalues <- c(length_pvalues, c(patient, length_test$p.value))
+  
+  # Run test on hydrophobicity (only for patients with sufficient data)
+  if (patient %in% unique(hydro_data$PatientID)) {
+    patient_clones_hydro <- patient_clones[!is.na(patient_clones$pos_5_13_hydrophobicity),]
+    if (nrow(patient_clones_hydro) > 0) {
+      hydro_test <- wilcox.test(pos_5_13_hydrophobicity ~ status, data = patient_clones_hydro)
+      hydro_pvalues <- c(hydro_pvalues, c(patient, hydro_test$p.value))
+    }
+  }
+}
+
+# Create a color palette with enough distinct colors for all patients
+n_patients <- length(unique(length_data$PatientID))
+patient_colors <- colorRampPalette(c("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", 
+                                     "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", 
+                                     "#bcbd22", "#17becf"))(n_patients)
+
+# Add shape mapping for status
+shape_values <- c("survived" = 16, "disappeared" = 17)  # Filled circle and triangle
+
+# 1. CDR3 Length visualization with patient-specific colors
+p_length <- ggplot(length_data, aes(x = status, y = length, group = PatientID, color = PatientID)) +
+  # Add lines connecting points for each patient
+  geom_line(linewidth = 1) +
+  
+  # Add points with different shapes based on status
+  geom_point(aes(shape = status), size = 4) +
+  
+  # Labels
+  labs(
+    title = "CDR3 Length by Clone Survival Status",
+    subtitle = "Patient-specific changes after PTCy",
+    x = "Survival Status",
+    y = "Mean CDR3 Length (amino acids)"
+  ) +
+  theme_pubr() +
+  scale_color_manual(values = setNames(patient_colors, unique(length_data$PatientID))) +
+  scale_shape_manual(values = shape_values) +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.position = "right",
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10)
+  )
+
+# 2. Hydrophobicity visualization with patient-specific colors
+p_hydro <- ggplot(hydro_data, aes(x = status, y = hydro, group = PatientID, color = PatientID)) +
+  # Add lines connecting points for each patient
+  geom_line(linewidth = 1) +
+  
+  # Add points with different shapes based on status
+  geom_point(aes(shape = status), size = 4) +
+  
+  # Labels
+  labs(
+    title = "CDR3 Position 5-13 Hydrophobicity by Clone Survival Status",
+    subtitle = "Patient-specific changes after PTCy",
+    x = "Survival Status",
+    y = "Mean Hydrophobicity Score (pos 5-13)"
+  ) +
+  theme_pubr() +
+  scale_color_manual(values = setNames(patient_colors, unique(hydro_data$PatientID))) +
+  scale_shape_manual(values = shape_values) +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.position = "right",
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10)
+  )
+
+# Display the plots
+print(p_length)
+print(p_hydro)
+
+# Save the plots
+ggsave("cdr3_length_comparison_by_patient_colored.png", plot = p_length, width = 10, height = 7, dpi = 300)
+ggsave("hydrophobicity_comparison_by_patient_colored.png", plot = p_hydro, width = 10, height = 7, dpi = 300)
+
+# Print p-values for each patient
+cat("\nCDR3 Length p-values by patient:\n")
+length_pvalue_df <- matrix(length_pvalues, ncol = 2, byrow = TRUE)
+colnames(length_pvalue_df) <- c("PatientID", "p-value")
+print(length_pvalue_df)
+
+cat("\nHydrophobicity p-values by patient:\n")
+hydro_pvalue_df <- matrix(hydro_pvalues, ncol = 2, byrow = TRUE)
+colnames(hydro_pvalue_df) <- c("PatientID", "p-value")
+print(hydro_pvalue_df)
+```
+
+#### Basis Analysis
+
+```{r}
+dt_scale <- fread("/home/jz3553/data/MLR_jesse_data/Clustered_Allo_cs.csv", select = c("tag", "clone_scales"))
+dt <- fread("/home/jz3553/data/MLR_jesse_data/NewClustering.csv", select = c("tag", "cdr3_amino_acid", "v_resolved", "j_resolved", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "GVHD_GRADE_1", "PTCy", "cell_type","PatientID", "DonorType", "Onset"))
+allclones <- fread("/home/jz3553/data/AllClones_all.csv")
+
+setnames(allclones, old = c("cdr3_amino_acid", "v_resolved", "j_resolved"),
+         new = c("CDR3", "Vgene", "Jgene"), skip_absent = TRUE)
+setnames(dt, old = c("cdr3_amino_acid", "v_resolved", "j_resolved"),
+         new = c("CDR3", "Vgene", "Jgene"), skip_absent = TRUE)
+
+setkey(allclones, CDR3, Vgene, Jgene)
+setkey(dt, CDR3, Vgene, Jgene)
+
+basis_cols <- as.character(1:10)
+basis_scores <- dt[, c("CDR3", "Vgene", "Jgene", basis_cols), with = FALSE]
+allclones <- basis_scores[allclones, on = .(CDR3, Vgene, Jgene)]
+sapply(allclones[, ..basis_cols], function(x) sum(x > 0, na.rm = TRUE))
+```
+
+```{r}
+new_thresholds <- c(
+  "1" = 0.055255063,
+  "2" = 0.13975275,
+  "3" = 0.060886793,
+  "4" = 0.09434857,
+  "5" = 0.2077952,
+  "6" = 0.06637823,
+  "7" = 0.050072215,
+  "8" = 0.13079754,
+  "9" = 0.06395816,
+  "10" = 0.066668764
+)
+
+create_cluster_subset <- function(dt, basis) {
+  basis <- as.character(basis)
+  threshold <- new_thresholds[basis]
+  subset_dt <- dt[dt[[basis]] > threshold, .(
+    CDR3, Vgene, Jgene, gene = "TRB",
+    score = .SD[[basis]], PatientID
+  )]
+  return(unique(subset_dt))
+}
+
+dt_b <- vector("list", 10)
+for (i in 1:10) {
+  dt_b[[i]] <- create_cluster_subset(allclones, i)
+}
+
+lapply(dt_b, nrow)
+```
+
+```{r}
+hydrophobicity_chart <- read.csv("/home/jz3553/data/MLR_jesse_data/HydrophobicityScale.csv")
+
+calculate_hydrophobicity <- function(cdr3_string, hydrophobicity_table) {
+  cdr3_string <- as.character(cdr3_string)
+  hydrophobicity_sum <- 0
+  num_amino_acids <- 0
+  for (amino_acid in strsplit(cdr3_string, NULL)[[1]]) {
+    hydrophobicity_value <- hydrophobicity_table$Hydrophobicity[hydrophobicity_table$AA == amino_acid]
+    if (length(hydrophobicity_value) > 0) {
+      hydrophobicity_sum <- hydrophobicity_sum + hydrophobicity_value
+      num_amino_acids <- num_amino_acids + 1
+    }
+  }
+  if (num_amino_acids > 0) {
+    return(hydrophobicity_sum / num_amino_acids)
+  } else {
+    return(NA)
+  }
+}
+
+calculate_hydrophobicity_for_positions <- function(strings, hydrophobicity_table) {
+  sapply(strings, function(string) {
+    string <- as.character(string)
+    if (nchar(string) < 13) return(NA)
+    substring_to_use <- substring(string, 5, 13)
+    calculate_hydrophobicity(substring_to_use, hydrophobicity_table)
+  })
+}
+```
+
+```{r}
+motif_hydrophobicity <- list(
+  b1 = calculate_hydrophobicity_for_positions(dt_b[[1]]$CDR3, hydrophobicity_chart),
+  b2 = calculate_hydrophobicity_for_positions(dt_b[[2]]$CDR3, hydrophobicity_chart),
+  b4 = calculate_hydrophobicity_for_positions(dt_b[[4]]$CDR3, hydrophobicity_chart),
+  b7 = calculate_hydrophobicity_for_positions(dt_b[[7]]$CDR3, hydrophobicity_chart),
+  b8 = calculate_hydrophobicity_for_positions(dt_b[[8]]$CDR3, hydrophobicity_chart),
+  b9 = calculate_hydrophobicity_for_positions(dt_b[[9]]$CDR3, hydrophobicity_chart)
+)
+```
+
+```{r}
+hydro_values <- unlist(motif_hydrophobicity, use.names = FALSE)
+
+combined_hydrophobicity <- data.frame(
+  Segment = rep(names(motif_hydrophobicity), times = sapply(motif_hydrophobicity, length)),
+  Hydrophobicity = hydro_values
+)
+combined_hydrophobicity <- combined_hydrophobicity[!is.na(combined_hydrophobicity$Hydrophobicity), ]
+
+# Assign groupings
+combined_hydrophobicity_grouped <- combined_hydrophobicity %>%
+  dplyr::mutate(BasisGroup = dplyr::case_when(
+    Segment %in% c("b4", "b8") ~ "no_basis",
+    Segment %in% c("b1") ~ "mild_basis",
+    Segment %in% c("b2", "b7", "b9") ~ "severe_basis"
+  ))
+
+combined_hydrophobicity_grouped$BasisGroup <- factor(
+  combined_hydrophobicity_grouped$BasisGroup,
+  levels = c("no_basis", "mild_basis", "severe_basis")
+)
+```
+
+```{r}
+head(combined_hydrophobicity)
+str(combined_hydrophobicity)
+```
+
+```{r}
+library(ggplot2)
+library(ggpubr)
+
+p <- ggplot(combined_hydrophobicity_grouped, aes(x = BasisGroup, y = Hydrophobicity, fill = BasisGroup)) +
+  geom_violin(width = 0.25) +
+  labs(
+    title = "Hydrophobicity Scores by Basis\nPosition 5–13",
+    x = "Basis Group",
+    y = "Hydrophobicity (AA 5–13)"
+  ) +
+  theme_pubr() +
+  scale_fill_manual(values = c(
+    "severe_basis" = "#B85000",
+    "mild_basis" = "#005A8F",
+    "no_basis" = "#09BB8C"
+  )) +
+  stat_compare_means(
+    method = "wilcox.test",
+    comparisons = list(c("severe_basis", "mild_basis"),
+                       c("severe_basis", "no_basis"),
+                       c("mild_basis", "no_basis")),
+    label = "p.signif",
+    p.adjust.method = "holm",
+    size = 6
+  ) +
+  theme(
+    plot.title = element_text(size = 32, hjust = 0.5),
+    axis.title.x = element_text(size = 32),
+    axis.title.y = element_text(size = 32),
+    axis.text = element_text(size = 22),
+    legend.text = element_text(size = 20),
+    legend.title = element_text(size = 20)
+  )
+
+# View it
+print(p)
+```
+
+```{r}
+library(ggplot2)
+library(ggpubr)
+library(dplyr)
+library(extrafont) # make sure Arial is available
+
+p <- ggplot(combined_hydrophobicity_grouped, aes(x = BasisGroup, y = Hydrophobicity, fill = BasisGroup)) +
+  geom_violin(width = 0.4, alpha = 0.7) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, color = "black", lwd = 0.3) +
+  labs(
+    title = "Hydrophobicity\n(Positions 5–13)",
+    x = "Basis",
+    y = "Score"
+  ) +
+  theme_pubr(base_size = 8.5, base_family = "Arial") +  # was 7
+  scale_fill_manual(values = c(
+    "severe_basis" = "#B85000",
+    "mild_basis" = "#005A8F",
+    "no_basis" = "#09BB8C"
+  )) +
+  stat_compare_means(
+    method = "wilcox.test", 
+    comparisons = list(
+      c("severe_basis", "mild_basis"), 
+      c("severe_basis", "no_basis"), 
+      c("mild_basis", "no_basis")),
+    label = "p.signif",
+    p.adjust.method = "holm",
+    size = 2.5  # was 2.2
+  ) +
+  scale_x_discrete(limits = c("no_basis", "mild_basis", "severe_basis")) +
+  coord_cartesian(xlim = c(0.9, 3.3)) +
+  theme(
+    plot.title = element_text(size = 8.5, hjust = 0.5),  # was 6.5
+    axis.title.x = element_text(size = 8 ),  # was 6
+    axis.title.y = element_text(size = 8),
+    axis.text = element_text(size = 7.5),  # was 5.5
+    legend.position = "none",
+    axis.ticks.length = unit(0.015, "cm"),
+    plot.margin = margin(1, 1, 1, 1)
+  )
+
+# # Save in all formats
+# # Save in all formats with small, tight layout# Save in all formats with new filenames
+# ggsave("/home/jz3553/figures/updated_figs/Basis_Hydrophobicity_5-13_AllClones.svg",
+#        plot = p, width = 3, height = 2, dpi = 300, units = "in")
+
+# ggsave("/home/jz3553/figures/updated_figs/Basis_Hydrophobicity_5-13_AllClones.pdf",
+#        plot = p, width = 3, height = 2, dpi = 300, units = "in", device = cairo_pdf)
+
+# ggsave("/home/jz3553/figures/updated_figs/Basis_Hydrophobicity_5-13_AllClones.png",
+#        plot = p, width = 3, height = 2, dpi = 300, units = "in")
+```
+
+```{r}
+p
+```
+
+#### Running Hydrophobicity on ALLOREACTIVE CLONES
+
+```{r}
+alloreactive_clones <- allclones %>% filter(type == "allo")
+head(alloreactive_clones)
+names(alloreactive_clones)
+```
+
+```{r}
+cols_with_mild_or_severe <- sapply(alloreactive_clones, function(col) any(grepl("Mild|Severe", col, ignore.case = FALSE)))
+names(cols_with_mild_or_severe[cols_with_mild_or_severe])
+```
+
+```{r}
+unique(alloreactive_clones$GVHD_GRADE_1)
+unique(alloreactive_clones$GVHD_GRADE_2)
+```
+
+```{r}
+# Load hydrophobicity scale
+hydrophobicity_chart <- read.csv("/home/jz3553/data/MLR_jesse_data/HydrophobicityScale.csv")
+
+calculate_hydrophobicity <- function(cdr3_string, hydrophobicity_table) {
+  cdr3_string <- as.character(cdr3_string)
+  hydrophobicity_sum <- 0
+  num_amino_acids <- 0
+  for (amino_acid in strsplit(cdr3_string, NULL)[[1]]) {
+    hydrophobicity_value <- hydrophobicity_table$Hydrophobicity[hydrophobicity_table$AA == amino_acid]
+    if (length(hydrophobicity_value) > 0) {
+      hydrophobicity_sum <- hydrophobicity_sum + hydrophobicity_value
+      num_amino_acids <- num_amino_acids + 1
+    }
+  }
+  if (num_amino_acids > 0) {
+    return(hydrophobicity_sum / num_amino_acids)
+  } else {
+    return(NA)
+  }
+}
+
+calculate_hydrophobicity_for_positions <- function(strings, hydrophobicity_table) {
+  sapply(strings, function(string) {
+    string <- as.character(string)
+    if (nchar(string) < 13) {
+      return(NA)
+    } else {
+      substring_to_use <- substr(string, 5, 13)
+      return(calculate_hydrophobicity(substring_to_use, hydrophobicity_table))
+    }
+  })
+}
+```
+
+```{r}
+alloreactive_clones$Hydrophobicity_5_13 <- calculate_hydrophobicity_for_positions(
+  alloreactive_clones$CDR3,
+  hydrophobicity_table = hydrophobicity_chart
+)
+```
+
+```{r}
+summary(nchar(alloreactive_clones$CDR3))
+table(nchar(alloreactive_clones$CDR3) >= 13)
+```
+
+```{r}
+# Keep only specific grades
+grades_to_keep <- c("No", "Mild", "Severe")
+
+# Clean and filter data
+alloreactive_clones_clean <- alloreactive_clones %>%
+  filter(!is.na(Hydrophobicity_5_13)) %>%
+  filter(GVHD_GRADE_1 %in% grades_to_keep) %>%
+  mutate(GVHD_GRADE_1 = factor(GVHD_GRADE_1, levels = grades_to_keep))
+
+# Define comparisons
+comparisons <- combn(grades_to_keep, 2, simplify = FALSE)
+```
+
+```{r}
+# How many repeated CDR3 sequences?
+sum(duplicated(alloreactive_clones$CDR3))
+
+# Display rows that have a duplicate CDR3 sequence
+dup_cdr3 <- alloreactive_clones_clean[
+  duplicated(alloreactive_clones_clean$CDR3) |
+  duplicated(alloreactive_clones_clean$CDR3, fromLast = TRUE),
+]
+dup_cdr3
+```
+
+```{r}
+alloreactive_clones_nodups <- alloreactive_clones %>%
+  distinct(CDR3, Vgene, Jgene, .keep_all = TRUE)
+```
+
+```{r}
+alloreactive_clones_nodups$Hydrophobicity_5_13 <- calculate_hydrophobicity_for_positions(
+  alloreactive_clones_nodups$CDR3,
+  hydrophobicity_table = hydrophobicity_chart
+)
+```
+
+```{r}
+grades_to_keep <- c("No", "Mild", "Severe")
+
+alloreactive_clones_clean <- alloreactive_clones_nodups %>%
+  filter(!is.na(Hydrophobicity_5_13)) %>%
+  filter(GVHD_GRADE_1 %in% grades_to_keep) %>%
+  mutate(GVHD_GRADE_1 = factor(GVHD_GRADE_1, levels = grades_to_keep))
+
+# 4) Define pairwise comparisons
+comparisons <- combn(grades_to_keep, 2, simplify = FALSE)
+
+# 5) Plot a violin chart with statistical comparisons
+pp2 <- ggplot(alloreactive_clones_clean, 
+              aes(x = GVHD_GRADE_1, y = Hydrophobicity_5_13, fill = GVHD_GRADE_1)) +
+  geom_violin(width = 0.25, trim = FALSE) +
+  labs(
+    title = "Hydrophobicity (AA 5-13) in Alloreactive Clones\nby GVHD Grade",
+    x = "GVHD Grade",
+    y = "Hydrophobicity Score"
+  ) +
+  scale_fill_manual(values = c(
+    "No"     = "#09BB8C",
+    "Mild"   = "#005A8F",
+    "Severe" = "#B85000"
+  )) +
+  stat_compare_means(
+    method = "wilcox.test",
+    comparisons = comparisons,
+    label = "p.signif",
+    p.adjust.method = "holm"
+  ) +
+  stat_compare_means(method = "kruskal.test", label.y = 1.1) +
+  theme_pubr() +
+  theme(
+    plot.title   = element_text(size = 28, hjust = 0.5),
+    axis.title.x = element_text(size = 24),
+    axis.title.y = element_text(size = 24),
+    axis.text    = element_text(size = 18),
+    legend.text  = element_text(size = 16),
+    legend.title = element_text(size = 16)
+  )
+
+# Display the plot
+pp2
+```
+
+```{r}
+library(ggplot2)
+library(ggpubr)
+library(dplyr)
+
+grades_to_keep <- c("No", "Mild", "Severe")
+
+alloreactive_clones_clean <- alloreactive_clones_nodups %>%
+  filter(!is.na(Hydrophobicity_5_13)) %>%
+  filter(GVHD_GRADE_1 %in% grades_to_keep) %>%
+  mutate(GVHD_GRADE_1 = factor(GVHD_GRADE_1, levels = grades_to_keep))
+
+# Define pairwise comparisons (Wilcoxon)
+comparisons <- combn(grades_to_keep, 2, simplify = FALSE)
+
+# Plot
+pp2 <- ggplot(alloreactive_clones_clean, 
+              aes(x = GVHD_GRADE_1, y = Hydrophobicity_5_13, fill = GVHD_GRADE_1)) +
+  geom_violin(width = 0.35, trim = FALSE) +            # Match the style from reference
+  geom_boxplot(width = 0.15, outlier.shape = NA, 
+               color = "black") +                      # Overlay boxplot
+  labs(
+    title = "Hydrophobicity (AA 5-13) in Alloreactive Clones\nby GVHD Grade",
+    x = "GVHD Grade",
+    y = "Hydrophobicity Score"
+  ) +
+  theme_pubr() +
+  scale_fill_manual(values = c(
+    "No"     = "#09BB8C",
+    "Mild"   = "#005A8F",
+    "Severe" = "#B85000"
+  )) +
+  theme(
+    plot.title       = element_text(size = 8,  hjust = 0.5), 
+    axis.title.x     = element_text(size = 7),
+    axis.title.y     = element_text(size = 7),
+    axis.text        = element_text(size = 6),
+    legend.position  = "none",
+    axis.ticks.length = unit(0.01, "cm")
+  ) +
+  stat_compare_means(
+    method = "wilcox.test",
+    comparisons = comparisons,
+    label = "p.signif",
+    p.adjust.method = "holm",
+    size = 3
+  )
+
+# Display on screen
+pp2
+
+# # Save a more rectangular figure: 3 inches wide, 2 inches high
+# ggsave(
+#   filename = "/home/jz3553/figures/updated_figs/Basis_Hydrophobicity_5-13_Alloreactive.pdf",
+#   plot     = pp2,
+#   width    = 3,
+#   height   = 2,
+#   dpi      = 300,
+#   units    = "in",
+#   device   = cairo_pdf
+# )
+
+# ggsave(
+#   filename = "/home/jz3553/figures/updated_figs/Basis_Hydrophobicity_5-13_Alloreactive.png",
+#   plot     = pp2,
+#   width    = 3,
+#   height   = 2,
+#   dpi      = 300,
+#   units    = "in"
+# )
+
+# ggsave(
+#   filename = "/home/jz3553/figures/updated_figs/Basis_Hydrophobicity_5-13_Alloreactive.svg",
+#   plot     = pp2,
+#   width    = 3,
+#   height   = 2,
+#   dpi      = 300,
+#   units    = "in"
+# )
+```
+
+#### Basis Analysis
+
+```{r}
+dt_scale <- fread("/home/jz3553/data/MLR_jesse_data/Clustered_Allo_cs.csv", select = c("tag", "clone_scales"))
+
+dt <- fread("/home/jz3553/data/MLR_jesse_data/NewClustering.csv", select = c("tag", "cdr3_amino_acid", "v_resolved", "j_resolved", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "GVHD_GRADE_1", "PTCy", "cell_type","PatientID", "DonorType", "Onset"))
+
+setkey(dt, tag)
+setkey(dt_scale, tag)
+
+# Perform a left join to keep only rows from dt and add clone_scales
+dt <- dt[dt_scale, on = "tag", nomatch = 0]
+
+dt[PatientID %in% c("R067", "R160"), GVHD_GRADE_1 := "Mild"]
+
+setnames(dt, c("cdr3_amino_acid", "v_resolved", "j_resolved"), c("CDR3", "Vgene", "Jgene"))
+dt[, gene := "TRB"]
+
+dt_unique <- unique(dt)
+```
+
+```{r}
+# head(dt_unique)
+```
+
+```{r}
+dt[, .N, by = .(tag, CDR3, Vgene, Jgene, gene)][N > 1]
+```
+
+```{r}
+#by basis
+
+new_thresholds <- c(
+  "1" = 0.055255063,
+  "2" = 0.13975275,
+  "3" = 0.060886793,
+  "4" = 0.09434857,
+  "5" = 0.2077952,
+  "6" = 0.06637823,
+  "7" = 0.050072215,
+  "8" = 0.13079754,
+  "9" = 0.06395816,
+  "10" = 0.066668764
+)
+
+create_cluster_subset <- function(dt, basis) {
+  basis <- as.character(basis)  
+  threshold <- new_thresholds[basis]  
+
+  subset_dt <- dt[dt[[basis]] > threshold, .(CDR3 = CDR3, Vgene = Vgene, Jgene = Jgene, gene = "TRB", score = get(basis), PatientID = PatientID)] #, Grade = GVHD_GRADE_1
+
+  return(unique(subset_dt))
+}
+
+
+dt_b <- vector("list", 10)
+for (i in 1:10) {
+  dt_b[[i]] <- create_cluster_subset(dt, i)
+}
+```
+
+```{r}
+print(dt_b)
+```
+
+#### Basis Hydrophobicity scores position 5-13
+
+```{r}
+load("/home/jz3553/data/MLR_jesse_data/AminoAcidFilter.rda")
+hydrophobicity_chart <- read.csv("/home/jz3553/data/MLR_jesse_data/HydrophobicityScale.csv")
+
+calculate_hydrophobicity <- function(cdr3_string, hydrophobicity_table) {
+    cdr3_string <- as.character(cdr3_string)
+    hydrophobicity_sum <- 0
+    num_amino_acids <- 0
+    for (amino_acid in strsplit(cdr3_string, NULL)[[1]]) {
+        hydrophobicity_value <- hydrophobicity_table$Hydrophobicity[hydrophobicity_table$AA == amino_acid]
+        if (length(hydrophobicity_value) > 0) {
+          hydrophobicity_sum <- hydrophobicity_sum + hydrophobicity_value 
+          num_amino_acids <- num_amino_acids + 1} 
+        }
+    if (num_amino_acids > 0) {
+        hydrophobicity_mean <- hydrophobicity_sum / num_amino_acids
+      } else {
+        hydrophobicity_mean <- 0
+      }
+    return(hydrophobicity_mean)
+    }
+
+calculate_hydrophobicity_for_positions <- function(strings, hydrophobicity_table) {
+    process_string <- function(string) {
+    string <- as.character(string)  
+
+    if (nchar(string) < 13) {
+        return(NA)
+    } else {
+        substring_to_use <- substring(string, 5, 13)
+        return(calculate_hydrophobicity(substring_to_use, hydrophobicity_table))}
+    }
+    hydrophobicity <- sapply(strings, process_string)
+    return(hydrophobicity)
+    }
+```
+
+```{r}
+# Calculate hydrophobicity for basis
+
+#for 5-13
+motif_hydrophobicity <- list(
+  b1 = calculate_hydrophobicity_for_positions(dt_b[[1]]$CDR3, hydrophobicity_table = hydrophobicity_chart),
+  b2 = calculate_hydrophobicity_for_positions(dt_b[[2]]$CDR3, hydrophobicity_table = hydrophobicity_chart),
+  # b3 = calculate_hydrophobicity_for_positions(dt_b[[3]]$CDR3, hydrophobicity_table = hydrophobicity_chart),
+  b4 = calculate_hydrophobicity_for_positions(dt_b[[4]]$CDR3, hydrophobicity_table = hydrophobicity_chart),
+  # b5 = calculate_hydrophobicity_for_positions(dt_b[[5]]$CDR3, hydrophobicity_table = hydrophobicity_chart),
+  # b6 = calculate_hydrophobicity_for_positions(dt_b[[6]]$CDR3, hydrophobicity_table = hydrophobicity_chart),
+  b7 = calculate_hydrophobicity_for_positions(dt_b[[7]]$CDR3, hydrophobicity_table = hydrophobicity_chart),
+  b8 = calculate_hydrophobicity_for_positions(dt_b[[8]]$CDR3, hydrophobicity_table = hydrophobicity_chart),
+  b9 = calculate_hydrophobicity_for_positions(dt_b[[9]]$CDR3, hydrophobicity_table = hydrophobicity_chart)
+  # b10 = calculate_hydrophobicity_for_positions(dt_b[[10]]$CDR3, hydrophobicity_table = hydrophobicity_chart)
+  # b14 = calculate_hydrophobicity_for_positions(dt_b[[14]]$CDR3, hydrophobicity_table = hydrophobicity_chart)
+)
+
+#This is for entire CDR3
+# motif_hydrophobicity <- list(
+#   b1 = sapply(dt_b[[1]]$CDR3, calculate_hydrophobicity, hydrophobicity_table = hydrophobicity_chart),
+#   b2 = sapply(dt_b[[2]]$CDR3, calculate_hydrophobicity, hydrophobicity_table = hydrophobicity_chart),
+#   # b3 = calculate_hydrophobicity_for_positions(dt_b[[3]]$CDR3, hydrophobicity_table = hydrophobicity_chart),
+#   b4 = sapply(dt_b[[4]]$CDR3, calculate_hydrophobicity, hydrophobicity_table = hydrophobicity_chart),
+#   # b5 = calculate_hydrophobicity_for_positions(dt_b[[5]]$CDR3, hydrophobicity_table = hydrophobicity_chart),
+#   # b6 = calculate_hydrophobicity_for_positions(dt_b[[6]]$CDR3, hydrophobicity_table = hydrophobicity_chart),
+#   b7 = sapply(dt_b[[7]]$CDR3, calculate_hydrophobicity, hydrophobicity_table = hydrophobicity_chart),
+#   b8 = sapply(dt_b[[8]]$CDR3, calculate_hydrophobicity, hydrophobicity_table = hydrophobicity_chart),
+#   b9 = sapply(dt_b[[9]]$CDR3, calculate_hydrophobicity, hydrophobicity_table = hydrophobicity_chart)
+#   # b10 = calculate_hydrophobicity_for_positions(dt_b[[10]]$CDR3, hydrophobicity_table = hydrophobicity_chart)
+#   # b14 = calculate_hydrophobicity_for_positions(dt_b[[14]]$CDR3, hydrophobicity_table = hydrophobicity_chart)
+# )
+
+combined_hydrophobicity <- data.frame(
+  Segment = rep(names(motif_hydrophobicity), sapply(motif_hydrophobicity, length)),
+  Hydrophobicity = unlist(motif_hydrophobicity, use.names = FALSE)
+)
+
+library(dplyr)
+
+#group all basis by severity
+combined_hydrophobicity_grouped <- combined_hydrophobicity %>%
+  mutate(BasisGroup = case_when(
+    Segment %in% c("b4", "b8") ~ "no_basis",
+    Segment %in% c("b1") ~ "mild_basis",
+    Segment %in% c("b2", "b7", "b9") ~ "severe_basis"
+  ))
+
+combined_hydrophobicity_grouped$BasisGroup <- factor(
+  combined_hydrophobicity_grouped$BasisGroup,
+  levels = c("no_basis", "mild_basis", "severe_basis")
+)
+
+p <- ggplot(combined_hydrophobicity_grouped, aes(x = BasisGroup, y = Hydrophobicity, fill = BasisGroup)) +
+  geom_violin(width = 0.25) +
+  labs(
+    title = "Hydrophobicity Scores by Basis\nPosition 5-13", # \n Position 5-13
+    x = "Basis",
+    y = "Hydrophobicity Score"
+  ) +
+  theme_pubr() +
+  scale_fill_manual(values = c(
+    "severe_basis" = "#B85000",
+    "mild_basis" = "#005A8F",
+    "no_basis" = "#09BB8C"
+  )) +
+  stat_compare_means(
+    method = "wilcox.test", 
+    comparisons = list(c("severe_basis", "mild_basis"), 
+                       c("severe_basis", "no_basis"), 
+                       c("mild_basis", "no_basis")),
+    label = "p.signif",   # Show significance stars
+    p.adjust.method = "holm",
+    size = 6 
+  )+
+  theme(
+    plot.title = element_text(size = 32, hjust = 0.5),    
+    axis.title.x = element_text(size = 32),                       
+    axis.title.y = element_text(size = 32),                
+    axis.text = element_text(size = 22),                   
+    legend.text = element_text(size = 20),                 
+    legend.title = element_text(size = 20)                 
+  )
+
+```
+
+```{r}
+p
+```
+
+```{r}
+p <- ggplot(combined_hydrophobicity_grouped, aes(x = BasisGroup, y = Hydrophobicity, fill = BasisGroup)) +
+  geom_violin(width = 0.25) +  
+  geom_boxplot(width = 0.15, outlier.shape = NA, color = "black") +  
+  labs(
+    title = "Hydrophobicity Scores by Basis\nPosition 5-13",
+    x = "Basis",
+    y = "Hydrophobicity Score"
+  ) +
+  theme_pubr() +
+  scale_fill_manual(values = c(
+    "severe_basis" = "#B85000",
+    "mild_basis" = "#005A8F",
+    "no_basis" = "#09BB8C"
+  )) +
+  stat_compare_means(
+    method = "wilcox.test", 
+    comparisons = list(c("severe_basis", "mild_basis"), 
+                       c("severe_basis", "no_basis"), 
+                       c("mild_basis", "no_basis")),
+    label = "p.signif",
+    p.adjust.method = "holm",
+    size = 6 
+  ) +
+  scale_x_discrete(limits = c("no_basis", "mild_basis", "severe_basis")) +  
+  coord_cartesian(xlim = c(0.9, 3.3)) +  
+  theme(
+    plot.title = element_text(size = 32, hjust = 0.5),
+    axis.title.x = element_text(size = 32),
+    axis.title.y = element_text(size = 32),
+    axis.text = element_text(size = 22),
+    legend.text = element_text(size = 20),
+    legend.title = element_text(size = 20),
+    axis.ticks.length = unit(0.01, "cm")  
+  )
+
+print(p)
+```
+
+```{r}
+# install.packages("extrafont")
+install.packages("svglite")
+```
+
+```{r}
+library(ggplot2)
+library(ggpubr)
+library(dplyr)
+library(extrafont) # make sure Arial is available
+
+# Load Arial if not already loaded
+# font_import(pattern = "Arial", prompt = FALSE)
+# loadfonts(device = "pdf")
+
+# Prepare grouped data
+combined_hydrophobicity_grouped <- combined_hydrophobicity %>%
+  mutate(BasisGroup = case_when(
+    Segment %in% c("b4", "b8") ~ "no_basis",
+    Segment %in% c("b1") ~ "mild_basis",
+    Segment %in% c("b2", "b7", "b9") ~ "severe_basis"
+  ))
+
+combined_hydrophobicity_grouped$BasisGroup <- factor(
+  combined_hydrophobicity_grouped$BasisGroup,
+  levels = c("no_basis", "mild_basis", "severe_basis")
+)
+
+p <- ggplot(combined_hydrophobicity_grouped, aes(x = BasisGroup, y = Hydrophobicity, fill = BasisGroup)) +
+  geom_violin(width = 0.4, alpha = 0.7) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, color = "black", lwd = 0.3) +
+  labs(
+    title = "Hydrophobicity\n(Positions 5–13)",
+    x = "Basis",
+    y = "Score"
+  ) +
+  theme_pubr(base_size = 8.5, base_family = "Arial") +  # was 7
+  scale_fill_manual(values = c(
+    "severe_basis" = "#B85000",
+    "mild_basis" = "#005A8F",
+    "no_basis" = "#09BB8C"
+  )) +
+  stat_compare_means(
+    method = "wilcox.test", 
+    comparisons = list(
+      c("severe_basis", "mild_basis"), 
+      c("severe_basis", "no_basis"), 
+      c("mild_basis", "no_basis")),
+    label = "p.signif",
+    p.adjust.method = "holm",
+    size = 2.5  # was 2.2
+  ) +
+  scale_x_discrete(limits = c("no_basis", "mild_basis", "severe_basis")) +
+  coord_cartesian(xlim = c(0.9, 3.3)) +
+  theme(
+    plot.title = element_text(size = 8.5, hjust = 0.5),  # was 6.5
+    axis.title.x = element_text(size = 8 ),  # was 6
+    axis.title.y = element_text(size = 8),
+    axis.text = element_text(size = 7.5),  # was 5.5
+    legend.position = "none",
+    axis.ticks.length = unit(0.015, "cm"),
+    plot.margin = margin(1, 1, 1, 1)
+  )
+
+# # Save in all formats
+# ggsave("/home/jz3553/figures/updated_figs/Basis_Hydrophobicity_5-13.svg", plot = p, width = 3, height = 2, dpi = 300, units = "in")
+# ggsave("/home/jz3553/figures/updated_figs/Basis_Hydrophobicity_5-13.pdf", plot = p, width = 3, height = 2, dpi = 300, units = "in", device = cairo_pdf)
+# ggsave("/home/jz3553/figures/updated_figs/Basis_Hydrophobicity_5-13.png", plot = p, width = 3, height = 2, dpi = 300, units = "in")
+```
+
+#### BLOSUM62_Distance_Comparisons.png
+
+```{r}
+library(Biostrings)
+
+# Function to compute distances based on BLOSUM62
+compute_blosum62_distances <- function(seq_vector1, seq_vector2) {
+  seq_set1 <- AAStringSet(seq_vector1)
+  seq_set2 <- AAStringSet(seq_vector2)
+  
+  dist_matrix <- stringDist(seq_set1, seq_set2, method = "substitutionMatrix", 
+                            substitutionMatrix = "BLOSUM62")
+  
+  dist_df <- as.matrix(dist_matrix)
+  mean_distances <- rowMeans(dist_df)
+  return(mean_distances)
+}
+
+
+combined_dt_b_no <- rbind(dt_b[[4]], dt_b[[8]])
+combined_dt_b_severe <- rbind(dt_b[[2]], dt_b[[7]], dt_b[[9]])
+
+mean_distance_no_mild <- compute_blosum62_distances(combined_dt_b_no$CDR3, dt_b[[1]]$CDR3) 
+mean_distance_mild_severe <- compute_blosum62_distances(dt_b[[1]]$CDR3, combined_dt_b_severe$CDR3) 
+mean_distance_no_severe <- compute_blosum62_distances(combined_dt_b_no$CDR3, combined_dt_b_severe$CDR3) 
+
+distance_data <- data.frame(
+  group = c(rep("No to Mild", length(mean_distance_no_mild)),
+            rep("Mild to Severe", length(mean_distance_mild_severe)),
+            rep("No to Severe", length(mean_distance_no_severe))),
+  mean_distance = c(mean_distance_no_mild, mean_distance_mild_severe, mean_distance_no_severe)
+)
+
+distance_data$group <- factor(distance_data$group, levels = c("No to Mild", "Mild to Severe", "No to Severe"))
+p = ggplot(distance_data, aes(x = group, y = mean_distance, fill = group)) +  
+  geom_violin(width = 0.35) +
+  geom_boxplot(width = 0.15, outlier.shape = NA, color = "black") +  
+  labs(
+    title = "BLOSUM62 Distance Comparisons",
+    x = "Comparison Group",
+    y = "Mean BLOSUM62 Distance"
+  ) +
+  theme_pubr() +
+  scale_fill_manual(values = c(
+    "No to Mild" = "#058B8E",    
+    "Mild to Severe" = "#659116", 
+    "No to Severe" = "#7B6555"    
+  )) +
+  scale_x_discrete(limits = c("No to Mild", "Mild to Severe", "No to Severe")) +  
+  coord_cartesian(xlim = c(0.9, 3.3)) +  
+  theme(
+    plot.title = element_text(size = 8, hjust = 0.5),   
+    axis.title.x = element_text(size = 7),               
+    axis.title.y = element_text(size = 7),              
+    axis.text = element_text(size = 6),                  
+    legend.position = "none",                             
+    axis.ticks.length = unit(0.01, "cm")                  
+  ) +
+  coord_cartesian(ylim = c(min(distance_data$mean_distance), 
+                           max(distance_data$mean_distance) * -1.2)) +  
+  stat_compare_means(
+    method = "wilcox.test", 
+    comparisons = list(c("No to Mild", "Mild to Severe"), 
+                       c("No to Mild", "No to Severe"), 
+                       c("Mild to Severe", "No to Severe")),
+    label = "p.signif",          
+    p.adjust.method = "holm",    
+    size = 3                     
+  )
+
+p
+```
+
+```{r}
+# # Save in all formats
+# ggsave("/home/jz3553/figures/updated_figs/BLOSUM_boxplot.pdf", plot = p, width = 2, height = 2, dpi = 300, units = "in", device = cairo_pdf)
+# ggsave("/home/jz3553/figures/updated_figs/BLOSUM_boxplot.png", plot = p, width = 2, height = 2, dpi = 300, units = "in")
+# ggsave("/home/jz3553/figures/updated_figs/BLOSUM_boxplot.svg", plot = p, width = 2, height = 2, dpi = 300, units = "in")
+```
+
+#### Basis CDR3 Lengths 
+
+```{r}
+length_severe <- c(nchar(dt_b[[2]]$CDR3), nchar(dt_b[[7]]$CDR3), nchar(dt_b[[9]]$CDR3))
+length_mild <- nchar(dt_b[[1]]$CDR3)
+length_no <- c(nchar(dt_b[[4]]$CDR3), nchar(dt_b[[8]]$CDR3))
+lengths <- data.frame(
+  length = c(length_severe, length_mild, length_no),
+  Basis = factor(rep(c("Severe", "Mild", "No"), 
+                    times = c(length(length_severe), length(length_mild), length(length_no))))
+)
+
+# Perform pairwise Wilcoxon test
+pairwise.wilcox.test(lengths$length, lengths$Basis, p.adjust.method = "holm")
+
+lengths$Basis <- factor(lengths$Basis, levels = c("Severe", "Mild", "No"))
+
+p <- ggplot(lengths, aes(x = Basis, y = length, fill = Basis)) +
+  geom_boxplot(width = 0.25) +
+  labs(title = "CDR3 Lengths by Basis Severity",
+       x = "Basis",
+       y = "CDR3 Length") +
+  theme_pubr() +
+  scale_fill_manual(values = c("Severe" = "#B85000", "Mild" = "#005A8F", "No" = "#09BB8C")) +
+  stat_compare_means(
+    method = "wilcox.test", 
+    comparisons = list(c("Severe", "Mild"), c("Severe", "No"), c("Mild", "No")), 
+    label = "p.signif",                         
+    p.adjust.method = "holm"                 
+  )+
+  theme(
+    plot.title = element_text(size = 28, face = "bold", hjust = 0.5),    
+    axis.title.x = element_text(size = 24),                       
+    axis.title.y = element_text(size = 24),                
+    axis.text = element_text(size = 20),                  
+    legend.text = element_text(size = 15),                 
+    legend.title = element_text(size = 15)                
+  )
+```
+
+```{r}
+p <- ggplot(lengths, aes(x = Basis, y = length, fill = Basis)) +
+  geom_boxplot(width = 0.5) +  
+  labs(title = "CDR3 Lengths by Basis Severity",
+       x = "Basis",
+       y = "CDR3 Length") +
+  theme_pubr(base_size = 18) +  
+  scale_fill_manual(values = c("Severe" = "#B85000", "Mild" = "#005A8F", "No" = "#09BB8C")) +
+  stat_compare_means(
+    method = "wilcox.test", 
+    comparisons = list(c("Severe", "Mild"), c("Severe", "No"), c("Mild", "No")),
+    label = "p.signif",
+    p.adjust.method = "holm"
+  ) +
+  coord_cartesian(xlim = c(0.7, 3.3)) +  
+  theme(
+    plot.title = element_text(size = 22, face = "bold", hjust = 0.5),
+    axis.title.x = element_text(size = 18),
+    axis.title.y = element_text(size = 18),
+    axis.text = element_text(size = 16),
+    legend.text = element_text(size = 14),
+    legend.title = element_text(size = 14),
+    axis.ticks.length = unit(0.3, "cm")  
+  )
+
+p
+```
+
+```{r}
+# ggsave("/home/jz3553/figures/Basis_Length.png", plot = p, dpi = 300, width = 8, height = 6)
+```
+
+```{r}
+#severe vs mild+no
+
+# Combine "Severe" and "Mild" into one group called "Severe/Mild"
+lengths <- lengths %>%
+  mutate(Group = ifelse(Basis %in% c("Severe", "Mild"), "Severe/Mild", "No"))
+lengths$Group <- factor(lengths$Group, levels = c("Severe/Mild", "No"))
+
+# Perform the Wilcoxon test for the new groups
+p <- ggplot(lengths, aes(x = Group, y = length, fill = Group)) +
+  geom_boxplot(width = 0.5) +
+  labs(title = "CDR3 Lengths: Severe/Mild vs No",
+       x = "Group",
+       y = "CDR3 Length") +
+  theme_pubr() +
+  scale_fill_manual(values = c("Severe/Mild" = "#659116", "No" = "#09BB8C")) +
+  stat_compare_means(
+    method = "wilcox.test", 
+    comparisons = list(c("Severe/Mild", "No")),  
+    label = "p.signif",                          
+    p.adjust.method = "holm"                      
+  )+
+  coord_cartesian(xlim = c(0.7, 3.3)) +  
+  theme(
+    plot.title = element_text(size = 28, face = "bold", hjust = 0.5),    
+    axis.title.x = element_text(size = 24),                        
+    axis.title.y = element_text(size = 24),                
+    axis.text = element_text(size = 20),                   
+    legend.text = element_text(size = 15),                 
+    legend.title = element_text(size = 15),                 
+    axis.ticks.length = unit(0.3, "cm")  
+  )
+
+p
+```
+
+```{r}
+p <- ggplot(lengths, aes(x = Group, y = length, fill = Group)) +
+  geom_boxplot(width = 0.5) +
+  labs(
+    title = "CDR3 Lengths: Severe/Mild vs No",
+    x = "Group",
+    y = "CDR3 Length"
+  ) +
+  theme_pubr(base_size = 8.5, base_family = "Arial") +
+  scale_fill_manual(values = c("Severe/Mild" = "#659116", "No" = "#09BB8C")) +
+  stat_compare_means(
+    method = "wilcox.test", 
+    comparisons = list(c("Severe/Mild", "No")),
+    label = "p.signif",
+    p.adjust.method = "holm",
+    size = 2.5
+  ) +
+  coord_cartesian(xlim = c(0.8, 2.2)) +
+  theme(
+    plot.title = element_text(size = 7.5, face = "bold", hjust = 0.5),
+    axis.title.x = element_text(size = 7.5),
+    axis.title.y = element_text(size = 7.5),
+    axis.text = element_text(size = 7),
+    legend.position = "none",  # Remove legend
+    axis.ticks.length = unit(0.15, "cm"),
+    plot.margin = margin(6, 4, 4, 4)  # More top margin to avoid clipping title
+  )
+
+p
+
+# # Save in multiple formats
+# ggsave("/home/jz3553/figures/updated_figs/CDR3_boxplot.pdf", plot = p, width = 2, height = 2, dpi = 300, units = "in", device = cairo_pdf)
+# ggsave("/home/jz3553/figures/updated_figs/CDR3_boxplot.png", plot = p, width = 2, height = 2, dpi = 300, units = "in")
+# ggsave("/home/jz3553/figures/updated_figs/CDR3_boxplot.svg", plot = p, width = 2, height = 2, dpi = 300, units = "in")
+```
+
+```{r}
+# p
+```
+
+```{r}
+# Custom split violin geometry
+GeomSplitViolin <- ggproto("GeomSplitViolin", GeomViolin,
+  draw_group = function(data, ..., draw_quantiles = NULL) {
+    data <- transform(data, 
+                      xminv = x - violinwidth * (x - xmin), 
+                      xmaxv = x + violinwidth * (xmax - x))
+    grp <- data$group[1]
+    newdata <- if (grp %% 2 == 1) {
+      transform(data, x = xminv)
+    } else {
+      transform(data, x = xmaxv)
+    }
+    
+    GeomPolygon$draw_panel(newdata, ...)
+  }
+)
+
+geom_split_violin <- function(mapping = NULL, data = NULL, stat = "ydensity",
+                              position = "identity", ..., draw_quantiles = NULL,
+                              trim = TRUE, scale = "area", na.rm = FALSE,
+                              show.legend = NA, inherit.aes = TRUE) {
+  layer(
+    data = data,
+    mapping = mapping,
+    stat = stat,
+    geom = GeomSplitViolin,
+    position = position,
+    show.legend = show.legend,
+    inherit.aes = inherit.aes,
+    params = list(
+      trim = trim,
+      scale = scale,
+      draw_quantiles = draw_quantiles,
+      na.rm = na.rm,
+      ...
+    )
+  )
+}
+```
+
+```{r}
+#severe vs mild+no
+# Combine "Severe" and "Mild" into one group called "Severe/Mild"
+lengths <- lengths %>%
+  mutate(Group = ifelse(Basis %in% c("No", "Mild"), "Mild/No", "Severe"))
+
+# Reorder the new groups for plotting
+lengths$Group <- factor(lengths$Group, levels = c("Severe", "Mild/No"))
+
+# Perform the Wilcoxon test for the new groups
+pairwise.wilcox.test(lengths$length, lengths$Group, p.adjust.method = "holm")
+
+lengths$Group <- factor(
+  lengths$Group,
+  levels = c("Mild/No", "Severe") # Desired order
+)
+
+# Create the updated boxplot
+p <- ggplot(lengths, aes(x = Group, y = length, fill = Group)) +
+  geom_boxplot(width = 0.25) +
+  labs(title = "CDR3 Lengths: Severe vs Mild/No",
+       x = "Group",
+       y = "CDR3 Length") +
+  theme_pubr() +
+  scale_fill_manual(values = c("Severe" = "#B85000", "Mild/No" = "#058B8E")) +
+  stat_compare_means(
+    method = "wilcox.test", 
+    comparisons = list(c("Severe", "Mild/No")),  # Comparing Severe vs Mild/No
+    label = "p.signif",                          # Show significance stars
+    p.adjust.method = "holm",
+    size = 8,
+    vjust = -0.5  # Move significance label upwards
+  ) +
+  coord_cartesian(ylim = c(min(lengths$length), max(lengths$length) * 1.1)) +  # Shorten figure
+  theme(
+    plot.title = element_text(size = 28, hjust = 0.5),    # Title size
+    axis.title.x = element_text(size = 28),                              # X-axis title size
+    axis.title.y = element_text(size = 28),                              # Y-axis label size
+    axis.text = element_text(size = 20),                                 # Axis tick labels size
+    legend.text = element_text(size = 15),                               # Legend text size
+    legend.title = element_text(size = 15)                               # Legend title size
+  )             # Legend title size
+```
+
+```{r}
+# Create the updated boxplot
+p <- ggplot(lengths, aes(x = Group, y = length, fill = Group)) +
+  geom_boxplot(width = 0.5) +
+  labs(
+    title = "CDR3 Lengths: Severe vs Mild/No",
+    x = "Group",
+    y = "CDR3 Length"
+  ) +
+  theme_pubr(base_size = 8.5, base_family = "Arial") +
+  scale_fill_manual(values = c("Severe" = "#B85000", "Mild/No" = "#058B8E")) +
+  stat_compare_means(
+    method = "wilcox.test", 
+    comparisons = list(c("Severe", "Mild/No")),
+    label = "p.signif",
+    p.adjust.method = "holm",
+    size = 2.5,
+    vjust = -0.5
+  ) +
+  coord_cartesian(ylim = c(min(lengths$length), max(lengths$length) * 1.1)) +
+  theme(
+    plot.title = element_text(size = 7.5, hjust = 0.5, face = "bold"),
+    axis.title.x = element_text(size = 7.5),
+    axis.title.y = element_text(size = 7.5),
+    axis.text = element_text(size = 7),
+    legend.position = "none",  # remove legend
+    axis.ticks.length = unit(0.15, "cm"),
+    plot.margin = margin(4, 4, 4, 4)
+  )
+
+# # Save in multiple formats (2 x 2 inches)
+# ggsave("/home/jz3553/figures/updated_figs/CDR3_boxplot.pdf", plot = p, width = 2, height = 2, dpi = 300, units = "in", device = cairo_pdf)
+# ggsave("/home/jz3553/figures/updated_figs/CDR3_boxplot.png", plot = p, width = 2, height = 2, dpi = 300, units = "in")
+# ggsave("/home/jz3553/figures/updated_figs/CDR3_boxplot.svg", plot = p, width = 2, height = 2, dpi = 300, units = "in")
+```
+
+```{r}
+p
+```
