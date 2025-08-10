@@ -6,6 +6,7 @@ import pyro
 from sklearn.preprocessing import LabelEncoder
 import torch
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 
 DECIPHER_GLOBALS = dict()
