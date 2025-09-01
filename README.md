@@ -20,3 +20,7 @@ Acknowlegement
 This work was made possible by the collaboration between the Azizi Lab and Reshef Lab, as well as our clinical partners at CUIMC and CCTI. We thank all participating patients and acknowledge the funding sources that supported this research.
 
 Citation
+
+Spatiotemporal Single-Cell Analysis Reveals T Cell Clonal Dynamics and Phenotypic Plasticity in Human Graft-versus-Host Disease
+Lingting Shi, Ajna Uzuni, Ximi K. Wang, Michael Pressler, David W. Harle, Shami Chakrabarti, Rodney Macedo, Kirubel Belay, Christian A. Gordillo, Erik Raps, Jia Yi (Ady) Zhang, Achille Nazaret, Joy L. Fan, Yinuo Jin, Xumin Shen, Joshua S. Fuller, Tamjeed Azad, Jessie Huang, Pranik Chainani, Julian A. Abrams, Armando Del Portillo, Markus Y. Mapara, Mohamed Alhamar, Megan Sykes, José L. McFaline-Figueroa, Elham Azizi, Ran Reshef
+bioRxiv 2025.05.24.655962; doi: https://doi.org/10.1101/2025.05.24.655962
