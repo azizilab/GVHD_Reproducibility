@@ -312,7 +312,7 @@ def find_sequence_rows_regex(df, sequence, column_name):
     return matching_rows
 
 
-def clustermap(df_res:pd.DataFrame, df_cat:pd.DataFrame, col_categories:list, offset:list, legend_positions:list, legend_colors:list, legend_sizes:list, title:str):
+def clustermap(df_res:pd.DataFrame, df_cat:pd.DataFrame, col_categories:list, offset:list, legend_positions:list, legend_colors:list, legend_sizes:list, title:str, display_cbar:bool = True):
     """
     Create a clustermap with colored rows based on categorical data.
     Parameters:
@@ -352,10 +352,12 @@ def clustermap(df_res:pd.DataFrame, df_cat:pd.DataFrame, col_categories:list, of
     ax = sns.clustermap(df_res.T, col_colors = row_colors, xticklabels = df_res.columns.values + 1, dendrogram_ratio=0.25, figsize = (10,10), cmap = sns.color_palette("light:#19647E", as_cmap=True), row_cluster = False)
     ax.ax_col_dendrogram.set_title(title)
     legs = []
-    for idx, lut in enumerate(luts):
-        cur_leg = display_cat(lut, figsize = legend_sizes[idx],title = col_categories[idx], title_x_offset= offset[idx]) #Create legend displaing categories
-        ax.ax_cbar.add_child_axes(cur_leg).set_position(legend_positions[idx])
     
+    if display_cbar:
+        for idx, lut in enumerate(luts):
+            cur_leg = display_cat(lut, figsize = legend_sizes[idx],title = col_categories[idx], title_x_offset= offset[idx]) #Create legend displaing categories
+            ax.ax_cbar.add_child_axes(cur_leg).set_position(legend_positions[idx])
+        
     ax.ax_row_dendrogram.set_visible(False)
     ax.ax_col_dendrogram.set_visible(False)
     
@@ -369,3 +371,36 @@ def clustermap(df_res:pd.DataFrame, df_cat:pd.DataFrame, col_categories:list, of
     plt.show()
     
     return ax
+
+def bernoulli_downsample(data, p_start, p_end):
+    """
+    Downsample timepoints in a NumPy array using Bernoulli sampling,
+    with decreasing probability for later timepoints. Replace downsampled
+    points with NaN values.
+    
+    Parameters:
+    data (np.ndarray): Input array with shape (n_samples, n_timepoints)
+    p_start (float): Starting probability of keeping a timepoint (0 < p_start <= 1)
+    p_end (float): Ending probability of keeping a timepoint (0 < p_end <= p_start)
+    
+    Returns:
+    np.ndarray: Downsampled array with NaN values
+    """
+    n_samples, n_timepoints = data.shape
+    
+    # Create a linearly decreasing probability array
+    p_array = np.linspace(p_start, p_end, n_timepoints)
+    
+    # Create a Bernoulli mask with decreasing probability
+    mask = np.random.binomial(1, p_array, size=(n_samples, n_timepoints))
+    
+    # Ensure at least one timepoint is kept for each sample
+    for i in range(n_samples):
+        if np.sum(mask[i]) == 0:
+            mask[i, np.random.randint(0, n_timepoints)] = 1
+    
+    # Create a copy of the data and replace masked values with NaN
+    downsampled = data.astype(float)  # Convert to float to support NaN
+    downsampled[mask == 0] = np.nan
+    
+    return downsampled
