@@ -87,7 +87,6 @@ psutil==7.0.0
 ptyprocess==0.7.0
 pure_eval==0.2.3
 py-cpuinfo==9.0.0
-pyg-lib==0.4.0+pt26
 Pygments==2.19.1
 pynndescent==0.5.13
 pyogrio==0.10.0

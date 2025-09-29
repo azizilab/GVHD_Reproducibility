@@ -404,3 +404,5 @@ def bernoulli_downsample(data, p_start, p_end):
     downsampled[mask == 0] = np.nan
     
     return downsampled
+
+
