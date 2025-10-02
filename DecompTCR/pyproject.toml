@@ -1,11 +1,12 @@
 [project]
-name = "decomptcr"
+name = "decompTCR"
 version = "0.1.0"
 description = "DecompTCR is a tool to analyze temporal TCR sequencing data by finding joint patterns across patients under various conditions."
 authors = [
     {name = "Michael Pressler"}
 ]
-license = {text = "MIT"}
+packages = [{include = "decompTCR", from="."}]
+license = "MIT"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

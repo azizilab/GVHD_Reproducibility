@@ -10,7 +10,8 @@ DecompTCR is available on PyPI under the name `decompTCR`. (Still needs to be up
 Create a conda environment with a recent Python version: `conda create -n "decompTCR-env" python=3.10`
 
 ### Step 2
-Install DecompTCR: `pip install decompTCR`
+Make sure you directory is in the folder of pyproject.toml. If poetry is not installed 'pip install poetry'
+Install DecompTCR: `poetry install`
 
 ## Quickstart tutorials
   - [1. Example of DecompTCR on a toy dataset.](pipelines/quickstart.ipynb)
@@ -20,12 +21,12 @@ Install DecompTCR: `pip install decompTCR`
 ```
 .
 ├── decompTCR:       Source code
-├── FigureOutput:    figure generation and tutorials
+├── FigureOutput:    pipeline outputs
 ├── input_data       source data location needed to run figure generation pipelines
 └── pipelines:       figure generation and tutorials
 ```
 
-## How to cite Decipher
+## How to cite DecompTCR
 Please cite our preprint: https://www.biorxiv.org/content/10.1101/2025.05.24.655962v1
 
 _Spatiotemporal Single-Cell Analysis Reveals T Cell Clonal Dynamics and Phenotypic Plasticity in Human Graft-versus-Host Disease_
