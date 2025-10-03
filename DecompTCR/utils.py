@@ -183,7 +183,7 @@ def display_cat(lut, figsize=(3, 4), vertical=True, title="", title_x_offset=-4)
         # Create custom x-tick positions and labels
         xticks = np.arange(0.5, 0.5 + len(lut) * 1.5, 1.5)
         ax.set_xticks(xticks)
-        ax.set_xticklabels(labels, rotation=90)  # Rotate labels for readability
+        ax.set_xticklabels(labels, rotation=90,)  # Rotate labels for readability
         
         # Hide unnecessary axis elements for a cleaner look
         ax.tick_params(axis='x', which='both', bottom=False, top=False)
@@ -260,8 +260,10 @@ def process_data(data, meta_data, last_timepoint = 180, n_filter = 2):
     """
     data["tag"] = data["PatientID"]+"_"+data["cdr3_amino_acid"]+data["v_resolved"]+data["j_resolved"]
     data = data[["frequency", "templates", "timepoint", "tag","PatientID", "cdr3_amino_acid", "v_resolved", "j_resolved"] + meta_data]
-    data = data[data.loc[:, "timepoint"].apply(lambda x:x.isnumeric())]
-    data.loc[:, "timepoint"] = data["timepoint"].astype(int)
+    if not np.issubdtype(data['timepoint'].dtype, np.number):
+        print("Converting timepoints to numeric values")
+        data = data[data.loc[:, "timepoint"].apply(lambda x:x.isnumeric())]
+        data.loc[:, "timepoint"] = data["timepoint"].astype(int)
     data = data[data["timepoint"] <=last_timepoint]
     clone_encoder = LabelEncoder().fit(data["tag"])
     clone_encoding = clone_encoder.transform(data["tag"])
