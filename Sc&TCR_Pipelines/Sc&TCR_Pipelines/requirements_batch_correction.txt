@@ -1,0 +1,29 @@
+# Requirements for 2. batch_correction.ipynb
+# Install with: pip install -r requirements_batch_correction.txt
+
+# Core single-cell
+scanpy==1.10.4
+anndata==0.11.1
+scvi-tools==1.2.1
+celltypist==1.6.3
+
+# Clustering
+leidenalg==0.10.2
+igraph==0.11.9
+
+# Scientific computing
+numpy==1.26.4
+pandas==2.2.3
+scipy==1.14.1
+scikit-misc==0.5.2   # required for highly_variable_genes with flavor='seurat_v3'
+
+# Deep learning
+torch==2.5.1
+
+# Plotting
+matplotlib==3.9.3
+seaborn==0.13.2
+
+# Utilities
+tqdm==4.67.1
+openpyxl==3.1.5      # required by pandas to read .xlsx meta file

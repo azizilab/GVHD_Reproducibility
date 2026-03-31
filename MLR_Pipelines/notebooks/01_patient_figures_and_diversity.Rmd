@@ -1,0 +1,1712 @@
+---
+title: "MLR Analysis - Patient Figures and Diversity Analysis"
+output: html_document
+---
+
+```{r setup}
+source("../config/config.R")
+source("../functions/mlr_functions.R")
+```
+
+```{r load_data}
+data           <- readRDS(file.path(PROCESSED_DATA_PATH, "patient_data_all.rds"))
+data_allo      <- readRDS(file.path(PROCESSED_DATA_PATH, "patient_data_allo.rds"))
+data_nonallo   <- readRDS(file.path(PROCESSED_DATA_PATH, "data_nonallo_list.rds"))
+data_meta      <- readRDS(file.path(PROCESSED_DATA_PATH, "data_meta.rds"))
+all_rep_div    <- readRDS(file.path(PROCESSED_DATA_PATH, "all_rep_div.rds"))
+all_allo_div   <- readRDS(file.path(PROCESSED_DATA_PATH, "all_allo_div.rds"))
+all_nonallo_div <- readRDS(file.path(PROCESSED_DATA_PATH, "all_nonallo_div.rds"))
+all_full_allo  <- readRDS(file.path(PROCESSED_DATA_PATH, "all_full_allo.rds"))
+expanded_clones <- readRDS(file.path(PROCESSED_DATA_PATH, "expanded_clones.rds"))
+filenames      <- readRDS(file.path(PROCESSED_DATA_PATH, "filenames.rds"))
+data_allo_squished_w0 <- readRDS(file.path(PROCESSED_DATA_PATH, "data_allo_squished_w0.rds"))
+data_nonallo_squished_w0 <- readRDS(file.path(PROCESSED_DATA_PATH, "data_nonallo_squished_w0.rds"))
+data_squished_w0 <- readRDS(file.path(PROCESSED_DATA_PATH, "data_squished_w0.rds"))
+meta_data_clin <- readRDS(file.path(PROCESSED_DATA_PATH, "meta_data_clin.rds"))
+meta_data      <- readRDS(file.path(PROCESSED_DATA_PATH, "meta_data.rds"))
+clinical_data  <- readRDS(file.path(PROCESSED_DATA_PATH, "clinical_data_full.rds"))
+data_CD48_all  <- readRDS(file.path(PROCESSED_DATA_PATH, "data_CD48_all.rds"))
+data_CD48_all_expand <- readRDS(file.path(PROCESSED_DATA_PATH, "data_CD48_all_expand.rds"))
+data_allo_w0   <- readRDS(file.path(PROCESSED_DATA_PATH, "patient_data_allo_w0.rds"))
+data_nonallo_w0 <- readRDS(file.path(PROCESSED_DATA_PATH, "patient_data_nonallo_w0.rds"))
+unique_identifiers <- c("cdr3_amino_acid", "v_resolved", "j_resolved")
+data_allo_outer <- readRDS(file.path(PROCESSED_DATA_PATH, "data_allo_outer.rds"))
+all_allo       <- readRDS(file.path(PROCESSED_DATA_PATH, "all_allo.rds"))
+all_nonallo    <- readRDS(file.path(PROCESSED_DATA_PATH, "all_nonallo.rds"))
+data_all       <- readRDS(file.path(PROCESSED_DATA_PATH, "data_all.rds"))
+data_squished  <- readRDS(file.path(PROCESSED_DATA_PATH, "data_squished.rds"))
+data_allo_squished <- readRDS(file.path(PROCESSED_DATA_PATH, "data_allo_squished.rds"))
+data_nonallo_squished <- readRDS(file.path(PROCESSED_DATA_PATH, "data_nonallo_squished.rds"))
+```
+
+```{r}
+all_allo_squished <- bind_rows(data_allo_squished_w0)%>%
+  mutate(tag = paste(cdr3_amino_acid, v_resolved, j_resolved), type = "Allo")%>%
+  select(PatientID, tag, type)%>%
+  distinct()
+all_nonallo_squished <- bind_rows(data_nonallo_squished_w0)%>%
+  mutate(tag = paste(cdr3_amino_acid, v_resolved, j_resolved), type = "Non-Allo")%>%
+  select(PatientID, tag, type)%>%
+  distinct()
+
+expanded_clones_squished <- bind_rows(expanded_clones)
+data_all_squished <- bind_rows(lapply(data, bind_rows))%>%
+  mutate(tag = paste(cdr3_amino_acid, v_resolved, j_resolved))
+
+data_all_squished_res <- data.frame()
+for(patient in unique(data_squished_w0$PatientID)){
+nonallo_pat <- all_nonallo_squished[all_nonallo_squished$PatientID == patient,]
+allo_pat <- all_allo_squished[all_allo_squished$PatientID == patient,]
+temp_squished<- data_squished_w0[data_squished_w0$PatientID == patient,]%>%
+  mutate(ifexpanded = ifelse(tag %in% expanded_clones_squished[expanded_clones_squished$PatientID == patient,]$tag, TRUE, FALSE))%>%
+  left_join(allo_pat, by = c("PatientID","tag"), relationship = "many-to-one")%>%
+  left_join(nonallo_pat, by = c("PatientID","tag"), relationship = "many-to-one")%>%
+  mutate(type = ifelse(is.na(type.x), ifelse(is.na(type.y), "Other", type.y), type.x))%>%
+  select(-c("type.y", "type.x"))
+
+data_all_squished_res <- bind_rows(data_all_squished_res,temp_squished)
+}
+
+data_all_squished <- data_all_squished_res
+data_all_squished_w0_meta <- dplyr::left_join(data_all_squished_res, meta_data_clin, by = "PatientID", multiple = "all", relationship = "many-to-one")
+
+# write.csv(data_all_squished_w0_meta, file ="/home/user/Documents/GVHD_project/MLR_analysis/AllClones_all.csv")
+
+```
+
+```{r}
+# Calculate number of unique clones (based on CDR3 amino acid + V + J) per patient and timepoint
+# Uses data_all_squished as input
+
+# Load required libraries
+library(dplyr)
+library(tidyr)
+
+# Function to count unique clones
+count_unique_clones <- function(data_all_squished) {
+  # Ensure data is properly formatted
+  if (!all(c("cdr3_amino_acid", "v_resolved", "j_resolved", "PatientID", "timepoint") %in% colnames(data_all_squished))) {
+    stop("Required columns not found in dataset")
+  }
+  
+  # 1. Count unique clones per patient
+  clones_per_patient <- data_all_squished %>%
+    group_by(PatientID) %>%
+    summarise(
+      unique_clones = n_distinct(paste(cdr3_amino_acid, v_resolved, j_resolved)),
+      .groups = "drop"
+    ) %>%
+    arrange(PatientID)
+  
+  # 2. Count unique clones per timepoint
+  clones_per_timepoint <- data_all_squished %>%
+    group_by(timepoint) %>%
+    summarise(
+      unique_clones = n_distinct(paste(cdr3_amino_acid, v_resolved, j_resolved)),
+      .groups = "drop"
+    ) %>%
+    arrange(timepoint)
+  
+  # 3. Count unique clones per patient and timepoint
+  clones_per_patient_timepoint <- data_all_squished %>%
+    group_by(PatientID, timepoint) %>%
+    summarise(
+      unique_clones = n_distinct(paste(cdr3_amino_acid, v_resolved, j_resolved)),
+      .groups = "drop"
+    ) %>%
+    arrange(PatientID, timepoint)
+  
+  # Return all results as a list
+  return(list(
+    by_patient = clones_per_patient,
+    by_timepoint = clones_per_timepoint,
+    by_patient_timepoint = clones_per_patient_timepoint
+  ))
+}
+
+# Example usage
+# results <- count_unique_clones(data_all_squished)
+# 
+# # Print results
+# print("Unique clones per patient:")
+# print(results$by_patient)
+# 
+# print("Unique clones per timepoint:")
+# print(results$by_timepoint)
+# 
+# print("Unique clones per patient and timepoint:")
+# print(results$by_patient_timepoint)
+# 
+# # Optional: Export results to CSV files
+# write.csv(results$by_patient, "unique_clones_by_patient.csv", row.names = FALSE)
+# write.csv(results$by_timepoint, "unique_clones_by_timepoint.csv", row.names = FALSE)
+# write.csv(results$by_patient_timepoint, "unique_clones_by_patient_timepoint.csv", row.names = FALSE)
+
+# Alternative approach with additional metrics
+calculate_clone_metrics <- function(data_all_squished) {
+  # Basic counts
+  clone_metrics <- data_all_squished %>%
+    group_by(PatientID, timepoint) %>%
+    summarise(
+      total_templates = sum(templates, na.rm = TRUE),
+      unique_clones = n_distinct(paste(cdr3_amino_acid, v_resolved, j_resolved)),
+      unique_cdr3 = n_distinct(cdr3_amino_acid),
+      unique_v_genes = n_distinct(v_resolved),
+      unique_j_genes = n_distinct(j_resolved),
+      .groups = "drop"
+    )
+  
+  # Calculate summary per patient (across all timepoints)
+  patient_summary <- data_all_squished %>%
+    group_by(PatientID) %>%
+    summarise(
+      total_templates = sum(templates, na.rm = TRUE),
+      unique_clones = n_distinct(paste(cdr3_amino_acid, v_resolved, j_resolved)),
+      unique_cdr3 = n_distinct(cdr3_amino_acid),
+      unique_v_genes = n_distinct(v_resolved),
+      unique_j_genes = n_distinct(j_resolved),
+      timepoints = n_distinct(timepoint),
+      .groups = "drop"
+    )
+  
+  return(list(
+    detailed = clone_metrics,
+    patient_summary = patient_summary
+  ))
+}
+
+# Example of how to execute this function:
+# results <- calculate_clone_metrics(data_all_squished)
+# print(results$detailed)
+# print(results$patient_summary)
+
+results <- count_unique_clones(data_all_squished)
+
+# View results
+print(results$by_patient)
+print(results$by_timepoint)
+print(results$by_patient_timepoint)
+```
+
+```{r}
+clones_per_patient_timepoint <- data_squished %>%
+    group_by(PatientID, timepoint) %>%
+    summarise(
+      unique_clones = n_distinct(paste(cdr3_amino_acid, v_resolved, j_resolved)),
+      .groups = "drop"
+    ) %>%
+    arrange(PatientID, timepoint)
+```
+
+
+```{r}
+expand_counts <- function(data) {
+  
+  # Create an empty list to store the expanded data frames
+  expanded_data_list <- list()
+  
+  # Loop through each row of the data frame
+  for (i in seq_len(nrow(data))) {
+    # Extract the id and count for the current row
+    cdr3 <- data$cdr3_amino_acid[i]
+    v <- data$v_resolved[i]
+    j <- data$j_resolved[i]
+    count <- data$templates[i]
+    
+    # Create a data frame with 'count' rows and a single 1 in the 'count' column
+    expanded_data <- data.frame(cdr3_amino_acid = rep(cdr3, count),v_resolved = rep(v, count),j_resolved = rep(j, count), templates = rep(1, count))
+    
+    # Add the expanded data frame to the list
+    expanded_data_list[[i]] <- expanded_data
+  }
+  
+  # Combine all the expanded data frames into a single data frame
+  expanded_data <- do.call(rbind, expanded_data_list)
+  
+  # Return the expanded data frame
+  return(expanded_data)
+}
+
+downsample <- function(immdata, num){
+  immdata_exp <- expand_counts(immdata)
+  immdata_exp_samp <- sample_n(immdata_exp, num)%>%
+    group_by(cdr3_amino_acid, v_resolved, j_resolved)%>%
+    summarise(templates = sum(templates), .groups="drop")%>%
+    mutate(frequency = templates/sum(templates))
+  
+  return(immdata_exp_samp)
+  
+}
+
+# immdata <- data_all[[i]]
+# immdata_1 <- immdata[[1]]
+# 
+# res <- downsample(immdata_1, 1000)
+# print(sum(res$templates))
+```
+
+
+```{r}
+
+  str_list = c("unstimulated","MLRCFSElo")
+  for (idx in sort(na.omit(data.frame(strtoi(unique(data_all_squished_w0_meta$timepoint))))[,1]))
+  {
+    str_list <-append(str_list, toString(idx))
+  }
+
+avg_timepoints <- data_all_squished_w0_meta %>%
+  group_by(PatientID,timepoint)%>%
+  summarise(freq = sum(frequency))%>%
+  filter(timepoint %in% str_list)%>%
+  ungroup()%>%
+  group_by(PatientID)%>%
+  summarise(ntp = n())
+
+min_ntp <- min(avg_timepoints$ntp)
+max_ntp <- max(avg_timepoints$ntp)
+avg_ntp <- mean(avg_timepoints$ntp)
+
+print(paste("Min # tp = ", min_ntp, ", Max # tp = ", max_ntp, ", Average # tp = ", avg_ntp))
+```
+
+```{r}
+jensen_shannon_all <- vector(mode = "list", length(data))
+jensen_shannon_all_vj <- vector(mode = "list", length(data))
+jensen_shannon_all_delta <- vector(mode = "list", length(data))
+
+
+# Calculate Jensen Shannon Divergence between each timepoint in each patient. 0 is the same and 1 is different. 
+
+for(i in seq(1,length(data),1)){ 
+  immdata <- data[[i]]
+  names(immdata) <- sapply(strsplit(names(immdata),"_"), function(x){x[[2]]})
+  
+  str_list = c("unstimulated","MLRCFSElo")
+  for (idx in sort(na.omit(data.frame(strtoi(names(immdata))))[,1]))
+  {
+    str_list <-append(str_list, toString(idx))
+  }
+  
+  immdata <- immdata[str_list]
+  # immdata_all <- bind_rows(immdata)%>%
+  #   group_by(cdr3_amino_acid,v_resolved, j_resolved)%>%
+  #   summarise(frequency = sum(frequency))%>%
+  #   arrange(desc(frequency))%>%
+  #   select(cdr3_amino_acid,v_resolved, j_resolved)%>%
+  #   head(20000)
+  
+  immdata_top <- bind_rows(immdata)%>%
+    group_by(cdr3_amino_acid, v_resolved, j_resolved, PatientID)%>%
+    # filter(timepoint != "unstimulated", timepoint != "MLRCFSElo")%>%
+    summarise(mean_freq = mean(frequency))%>%
+    arrange(desc(mean_freq))%>%
+    head(500)%>%
+    select(cdr3_amino_acid, v_resolved, j_resolved)
+  
+  immdata <- lapply(immdata, function(x) {
+    x %>%
+      dplyr::group_by(cdr3_amino_acid,v_resolved, j_resolved) %>% #Combine any duplicates and drop any unnecessary rows 
+      # dplyr::inner_join(immdata_top, by = c("cdr3_amino_acid","v_resolved", "j_resolved"))%>%
+      dplyr::summarise(templates = sum(templates), .groups = "drop") %>%
+      mutate(frequency = templates / sum(templates)) %>%
+      arrange(desc(frequency))  
+      })
+  
+  
+  immdata_vj <- lapply(immdata, function(x) {
+    x %>%
+      dplyr::group_by(v_resolved, j_resolved) %>% #Combine any duplicates and drop any unnecessary rows 
+      dplyr::summarise(templates = sum(templates), .groups = "drop") %>%
+      mutate(frequency = templates / sum(templates)) %>%
+      arrange(desc(frequency))  
+      })
+  
+  mat <- matrix(nrow = length(immdata), ncol = length(immdata))
+  colnames(mat) <- names(immdata)
+  rownames(mat) <- names(immdata)
+  mat_vj <- matrix(nrow = length(immdata), ncol = length(immdata))
+  colnames(mat_vj) <- names(immdata_vj)
+  rownames(mat_vj) <- names(immdata_vj)
+  
+  for(k in seq(1,length(immdata),1)){
+    for(j in seq(k,length(immdata),1)){
+      if(j != k){
+        
+        k_num <- sum(immdata[[k]]$templates)
+        j_num <- sum(immdata[[j]]$templates)
+        # print(k_num)
+        # print(j_num)
+        # if(k_num < 100 | j_num < 100){
+        #   # print("GO NEXT")
+        #   next
+        # }
+        # if (k_num > j_num & j_num > 100){
+        #   temp_k <- immdata[[k]]#downsample(immdata[[k]], j_num)
+        #   temp_j <- immdata[[j]]
+        # }else if (k_num > 100){
+        #   temp_k <- immdata[[k]]
+        #   temp_j <- immdata[[j]] #downsample(immdata[[j]], k_num)
+        # }
+        # else{
+        #   print("skipping")
+        #   next
+        # }
+        # print(sum(temp_j$templates))
+        # print(sum(temp_k$templates))
+        temp_k <- immdata[[k]]
+        temp_j <- immdata[[j]]
+        immdata_comp <- dplyr::full_join(temp_k, temp_j, by=unique_identifiers)%>%
+          replace_na(list(templates.x = 0, templates.y = 0, frequency.x = 0, frequency.y = 0))
+        res <- try(jensen_shannon(immdata_comp$frequency.x, immdata_comp$frequency.y)) 
+        if(is.numeric(res)){
+          mat[j,k] <- res
+        }else{
+          mat[j,k] <- 1
+        }
+      }
+    }
+  }
+  jensen_shannon_all[[i]] <- mat
+
+# for(k in seq(1,length(immdata_vj),1)){
+#     for(j in seq(k,length(immdata_vj),1)){
+#       if(j != k){
+#         k_num <- sum(immdata_vj[[k]]$templates)
+#         j_num <- sum(immdata_vj[[j]]$templates)
+#         if (k > j & j > 100){
+#           temp_vj_k <- downsample(immdata_vj[[k]], j_num)
+#           temp_vj_j <- immdata_vj[[j]]
+#         }else if (k > 100){
+#           temp_vj_k <- immdata_vj[[k]]
+#           temp_vj_j <- downsample(immdata_vj[[j]], k_num)
+#         }
+#         immdata_comp_vj <- dplyr::full_join(temp_vj_k[[k]], temp_vj_j[[j]], by=c("v_resolved", "j_resolved"))%>%
+#           replace_na(list(templates.x = 0, templates.y = 0, frequency.x = 0, frequency.y = 0))
+#         mat_vj[j,k] <- jensen_shannon(immdata_comp_vj$frequency.x, immdata_comp_vj$frequency.y) 
+#       }
+#     }
+#   }
+#   jensen_shannon_all_vj[[i]] <- mat_vj
+#   jensen_shannon_all_delta[[i]] <- sqrt(abs(mat-mat_vj))
+}
+
+
+for(i in seq(1,length(jensen_shannon_all),1)){
+  sample_meta_data <- data_meta[[i]]
+  j <- jensen_shannon_all[[i]]
+  # j_vj <- jensen_shannon_all_vj[[i]]
+  jensen_map_plot <- pheatmap(j, color = colorRampPalette(c("#E83F6F", "#FFFFFF", "#32936F"))(100), cluster_rows = FALSE, cluster_cols = FALSE, na_col = "white", border_color = NA, main = filenames[i], breaks = seq(0.1, 1.0, length.out = 100))#+
+  # jensen_vj_map_plot <- pheatmap(j_vj, color = colorRampPalette(c("#E83F6F", "#FFFFFF", "#32936F"))(100), cluster_rows = FALSE, cluster_cols = FALSE, na_col = "white", border_color = NA, main = filenames[i], breaks = seq(0.1, 1.0, length.out = 100))
+  # jensen_delta_map_plot <- pheatmap(sqrt(abs(j-j_vj)), color = colorRampPalette(c("#E83F6F", "#FFFFFF", "#32936F"))(100), cluster_rows = FALSE, cluster_cols = FALSE, na_col = "white", border_color = NA, main = filenames[i], breaks = seq(0.1, 1.0, length.out = 100))
+  
+  # ggsave(paste0('/Users/pressm/Documents/AziziLab/GVHD/immunoseq_r/Jensen/',sample_meta_data[1,1],'JensenShannonDivPlot.png'), plot = jensen_map_plot, width = 10, height = 5, dpi = 600)
+}
+
+```
+
+
+```{r}
+jensen_shannon_all_nonallo <- vector(mode = "list", length(data))
+jensen_shannon_all_nonallo_vj <- vector(mode = "list", length(data))
+jensen_shannon_all_nonallo_delta <- vector(mode = "list", length(data))
+
+# Calculate Jensen Shannon Divergence between each timepoint in each patient. 0 is the same and 1 is different. 
+
+for(i in seq(1,length(data),1)){ 
+  immdata <- data_nonallo_w0[[i]]
+  names(immdata) <- sapply(strsplit(names(immdata),"_"), function(x){x[[2]]})
+  
+  str_list = c("unstimulated","MLRCFSElo")
+  for (idx in sort(na.omit(data.frame(strtoi(names(immdata))))[,1]))
+  {
+    str_list <-append(str_list, toString(idx))
+  }
+  
+  immdata <- immdata[str_list]
+
+  # immdata_unstim_top <- immdata[["unstimulated"]]%>%
+  #   arrange(desc(frequency))%>%
+  #   head(10000)%>%
+  #   select(cdr3_amino_acid, v_resolved, j_resolved)
+  
+  immdata_top <- bind_rows(immdata)%>%
+    group_by(cdr3_amino_acid, v_resolved, j_resolved, PatientID)%>%
+    # filter(timepoint != "MLRCFSElo")%>%
+    summarise(mean_freq = mean(frequency))%>%
+    arrange(desc(mean_freq))%>%
+    head(500)%>%
+    select(cdr3_amino_acid, v_resolved, j_resolved)
+  
+  immdata <- lapply(immdata, function(x) {
+    x %>%
+      dplyr::group_by(cdr3_amino_acid,v_resolved, j_resolved) %>% #Combine any duplicates and drop any unnecessary rows
+      # dplyr::inner_join(immdata_top, by = c("cdr3_amino_acid","v_resolved", "j_resolved"))%>%
+      dplyr::summarise(templates = sum(templates), .groups = "drop") %>%
+      mutate(frequency = templates / sum(templates)) %>%
+      arrange(desc(frequency))
+      })
+  
+  
+  immdata_vj <- lapply(immdata, function(x) {
+    x %>%
+      dplyr::group_by(v_resolved, j_resolved) %>% #Combine any duplicates and drop any unnecessary rows 
+      dplyr::inner_join(immdata_top, by = c("cdr3_amino_acid","v_resolved", "j_resolved"))%>%
+      dplyr::summarise(templates = sum(templates), .groups = "drop") %>%
+      mutate(frequency = templates / sum(templates)) %>%
+      arrange(desc(frequency))  
+      })
+  
+  mat <- matrix(nrow = length(immdata), ncol = length(immdata))
+  colnames(mat) <- names(immdata)
+  rownames(mat) <- names(immdata)
+  
+  mat_vj <- matrix(nrow = length(immdata_vj), ncol = length(immdata_vj))
+  colnames(mat_vj) <- names(immdata_vj)
+  rownames(mat_vj) <- names(immdata_vj)
+  
+  for(k in seq(1,length(immdata),1)){
+    for(j in seq(k,length(immdata),1)){
+      if(j != k){
+        immdata_comp <- dplyr::full_join(immdata[[k]], immdata[[j]], by=unique_identifiers)#%>%
+          # replace_na(list(frequency.x = 0, frequency.y = 0, templates.x = 0, templates.y = 0))
+        res <- try(jensen_shannon(immdata_comp$templates.x, immdata_comp$templates.y))
+        if(is.numeric(res)){
+          mat[j,k] <- res
+        }else{
+          mat[j,k] <- 1
+        }
+      }
+    }
+  }
+  jensen_shannon_all_nonallo[[i]] <- mat
+  
+for(k in seq(1,length(immdata),1)){
+    for(j in seq(k,length(immdata),1)){
+      if(j != k){
+        immdata_comp <- dplyr::full_join(immdata_vj[[k]], immdata_vj[[j]], by=c("v_resolved", "j_resolved"))%>%
+          replace_na(list(frequency.x = 1, frequency.y = 1, templates.x = 1, templates.y = 1))
+        res <- try(jensen_shannon(immdata_comp$templates.x, immdata_comp$templates.y))
+        if(is.numeric(res)){
+          mat_vj[j,k] <- res
+        }else{
+          mat_vj[j,k] <- 1
+        }
+      }
+    }
+  }
+  jensen_shannon_all_nonallo_vj[[i]] <- mat_vj
+  jensen_shannon_all_nonallo_delta[[i]] <- abs(mat - mat_vj)
+}
+
+for(i in seq(1,length(jensen_shannon_all),1)){
+  sample_meta_data <- data_meta[[i]]
+  j <- jensen_shannon_all_nonallo[[i]]
+  j_vj <- jensen_shannon_all_nonallo_vj[[i]]
+  j_delta <- jensen_shannon_all_nonallo_delta[[i]]
+  jensen_map_plot <- pheatmap(j, color = colorRampPalette(c("#E83F6F", "#FFFFFF", "#32936F"))(100), cluster_rows = FALSE, cluster_cols = FALSE, na_col = "white", border_color = NA, main = filenames[i], breaks = seq(0.1, 1.0, length.out = 100))#+
+  # jensen_map_plot <- pheatmap(j_vj, color = colorRampPalette(c("#E83F6F", "#FFFFFF", "#32936F"))(100), cluster_rows = FALSE, cluster_cols = FALSE, na_col = "white", border_color = NA, main = filenames[i], breaks = seq(0.1, 1.0, length.out = 100))
+  # jensen_map_plot <- pheatmap(j_delta, color = colorRampPalette(c("#E83F6F", "#FFFFFF", "#32936F"))(100), cluster_rows = FALSE, cluster_cols = FALSE, na_col = "white", border_color = NA, main = filenames[i], breaks = seq(0.1, 1.0, length.out = 100))
+  # 
+  # ggsave(paste0('/Users/pressm/Documents/AziziLab/GVHD/immunoseq_r/Jensen/',sample_meta_data[1,1],'JensenShannonDivPlot.png'), plot = jensen_map_plot, width = 10, height = 5, dpi = 600)
+}
+
+```
+
+```{r}
+jensen_shannon_all_allo <- vector(mode = "list", length(data))
+jensen_shannon_all_allo_vj <- vector(mode = "list", length(data))
+jensen_shannon_all_allo_delta <- vector(mode = "list", length(data))
+
+# Calculate Jensen Shannon Divergence between each timepoint in each patient. 0 is the same and 1 is different. 
+
+for(i in seq(1,length(data),1)){ 
+  immdata <- data_allo_w0[[i]]
+  
+  names(immdata) <- sapply(strsplit(names(immdata),"_"), function(x){x[[2]]})
+  
+  str_list = c("unstimulated","MLRCFSElo")
+  for (idx in sort(na.omit(data.frame(strtoi(names(immdata))))[,1])){
+    str_list <-append(str_list, toString(idx))
+  }
+  
+  immdata <- immdata[str_list]
+  immdata_top <- bind_rows(immdata)%>%
+    group_by(cdr3_amino_acid, v_resolved, j_resolved, PatientID)%>%
+    # filter(timepoint != "unstimulated")%>%
+    summarise(mean_freq = mean(frequency))%>%
+    arrange(desc(mean_freq))%>%
+    head(500)%>%
+    select(cdr3_amino_acid, v_resolved, j_resolved)
+
+  
+  immdata_clone <- lapply(immdata, function(x) {
+    x %>%
+      dplyr::group_by(cdr3_amino_acid,v_resolved, j_resolved) %>% #Combine any duplicates and drop any unnecessary rows
+      # filter(ifexpanded == T)%>%
+      # dplyr::inner_join(immdata_top, by = c("cdr3_amino_acid", "v_resolved", "j_resolved"))%>%
+      dplyr::summarise(templates = sum(templates), .groups = "drop") %>%
+      mutate(frequency = templates / sum(templates)) %>%
+      arrange(cdr3_amino_acid)
+      })
+  
+  
+  immdata_vj <- lapply(immdata, function(x) {
+    x %>%
+      dplyr::group_by(v_resolved, j_resolved) %>% #Combine any duplicates and drop any unnecessary rows 
+      filter(ifexpanded == T)%>%
+      dplyr::summarise(templates = sum(templates), .groups = "drop") %>%
+      mutate(frequency = templates / sum(templates)) %>%
+      arrange(v_resolved)  
+      })
+  
+  mat <- matrix(nrow = length(immdata), ncol = length(immdata))
+  colnames(mat) <- names(immdata)
+  rownames(mat) <- names(immdata)
+  
+  mat_vj <- matrix(nrow = length(immdata_vj), ncol = length(immdata_vj))
+  colnames(mat_vj) <- names(immdata_vj)
+  rownames(mat_vj) <- names(immdata_vj)
+  
+  for(k in seq(1,length(immdata),1)){
+    for(j in seq(k,length(immdata),1)){
+      if(j != k){
+        immdata_comp <- dplyr::full_join(immdata[[k]], immdata[[j]], by=unique_identifiers)#%>%
+          # replace_na(list(frequency.x = 0, frequency.y = 0, templates.x = 0, templates.y = 0))
+        res <- try(jensen_shannon(immdata_comp$templates.x, immdata_comp$templates.y))
+        if(is.numeric(res)){
+          mat[j,k] <- res
+        }else{
+          mat[j,k] <- 1
+        }
+      }
+    }
+  }
+  jensen_shannon_all_allo[[i]] <- mat
+  
+  for(k in seq(1,length(immdata),1)){
+    for(j in seq(k,length(immdata),1)){
+      if(j != k){
+        immdata_comp <- dplyr::full_join(immdata_vj[[k]], immdata_vj[[j]], by=c("v_resolved", "j_resolved"))%>%
+          replace_na(list(frequency.x = 1, frequency.y = 1, templates.x = 1, templates.y = 1))
+        res <- try(jensen_shannon(immdata_comp$templates.x, immdata_comp$templates.y))
+        if(is.numeric(res)){
+          mat_vj[j,k] <- res
+        }else{
+          mat_vj[j,k] <- 1
+        }
+      }
+    }
+  }
+  jensen_shannon_all_allo_vj[[i]] <- mat_vj
+  jensen_shannon_all_allo_delta[[i]] <- abs(mat-mat_vj)
+}
+
+for(i in seq(1,length(jensen_shannon_all_allo),1)){
+  sample_meta_data <- data_meta[[i]]
+  j <- jensen_shannon_all_allo[[i]]
+  j_vj <- jensen_shannon_all_allo_vj[[i]]
+  j_delta <- jensen_shannon_all_allo_delta[[i]]
+  jensen_map_plot <- pheatmap(j, color = colorRampPalette(c("#E83F6F", "#FFFFFF", "#32936F"))(100), cluster_rows = FALSE, cluster_cols = FALSE, na_col = "white", border_color = NA, main = filenames[i], breaks = seq(0.1, 1.0, length.out = 100))#+
+  # jensen_map_plot <- pheatmap(j_vj, color = colorRampPalette(c("#E83F6F", "#FFFFFF", "#32936F"))(100), cluster_rows = FALSE, cluster_cols = FALSE, na_col = "white", border_color = NA, main = filenames[i], breaks = seq(0.1, 1.0, length.out = 100))
+  # jensen_map_plot <- pheatmap(j_delta, color = colorRampPalette(c("#E83F6F", "#FFFFFF", "#32936F"))(100), cluster_rows = FALSE, cluster_cols = FALSE, na_col = "white", border_color = NA, main = filenames[i], breaks = seq(0.1, 1.0, length.out = 100))
+  # 
+  # ggsave(paste0('/Users/pressm/Documents/AziziLab/GVHD/immunoseq_r/Jensen/',sample_meta_data[1,1],'JensenShannonDivPlot.png'), plot = jensen_map_plot, width = 10, height = 5, dpi = 600)
+}
+
+```
+
+```{r, fig.width = 16, fig.height = 9, dpi = 600 }
+
+
+type <- "GVHD_GRADE_1"
+
+all_jsd <- data.frame()
+allo_jsd <- data.frame()
+nonallo_jsd <- data.frame()
+for(i in seq(1, length(jensen_shannon_all), 1)){
+  all <- data.frame(jensen_shannon_all[[i]])
+  allo <- data.frame(jensen_shannon_all_allo[[i]])
+  nonallo <- data.frame(jensen_shannon_all_nonallo[[i]])
+  
+  all <- all['unstimulated']
+  allo <- allo['unstimulated']
+  nonallo <- nonallo['unstimulated']
+  
+  all$timepoint <- rownames(all)
+  allo$timepoint <- rownames(allo)
+  nonallo$timepoint <- rownames(nonallo)
+  
+  all$PatientID <- sapply(str_split(filenames[i], "_"), function(x){paste0("R",x[[2]])})
+  allo$PatientID <- sapply(str_split(filenames[i], "_"), function(x){paste0("R",x[[2]])})
+  nonallo$PatientID <- sapply(str_split(filenames[i], "_"), function(x){paste0("R",x[[2]])})
+  
+  
+  all[grepl("MLR", all$timepoint),]$timepoint <- "1"
+  allo[grepl("MLR", allo$timepoint),]$timepoint <- "1"
+  nonallo[grepl("MLR", nonallo$timepoint),]$timepoint <- "1"
+  
+  all[grepl("unstim", all$timepoint),]$timepoint <- "0"
+  allo[grepl("unstim", allo$timepoint),]$timepoint <- "0"
+  nonallo[grepl("unstim", nonallo$timepoint),]$timepoint <- "0"
+  
+  all <- all%>%
+    mutate(timepoint = strtoi(timepoint))
+  allo <- allo%>%
+    mutate(timepoint = strtoi(timepoint))
+  nonallo <- nonallo%>%
+    mutate(timepoint = strtoi(timepoint))
+  
+  all_jsd <- bind_rows(all_jsd, all)
+  allo_jsd <- bind_rows(allo_jsd, allo)
+  nonallo_jsd <- bind_rows(nonallo_jsd, nonallo)
+}
+
+all_jsd$rep_div <- "All"
+allo_jsd$rep_div <- "Alloreactive"
+nonallo_jsd$rep_div <- "Non-Alloreactive"
+
+all_jsd <- bind_rows(all_jsd, allo_jsd, nonallo_jsd)
+
+all_jsd_unstim_mlr <- all_jsd[all_jsd$timepoint == 1,]
+
+all_jsd_unstim_mlr_meta <- dplyr::inner_join(all_jsd_unstim_mlr, meta_data, by = "PatientID")
+
+num_cuts <- 2 #Change this to change the binning of the timepoints
+
+all_jsd <- all_jsd[all_jsd$timepoint <= 365 & all_jsd$timepoint != 0 & all_jsd$timepoint > 3,]%>% #get rid of timepoints before
+  mutate( time_bin = cut(timepoint, breaks=quantile(timepoint, probs = 0:num_cuts/num_cuts) , include.lowest = TRUE))
+
+all_jsd_meta <- dplyr::inner_join(all_jsd, meta_data, by = "PatientID") #Modify data for plotting
+all_jsd_meta <- all_jsd_meta[all_jsd_meta$timepoint <=365,]
+all_jsd_meta[all_jsd_meta$GVHD_GRADE_1 == "Unclassified/Severe",]$GVHD_GRADE_1 <- "Severe"
+all_jsd_meta[all_jsd_meta$GVHD_GRADE_2 == "Unclassfied/Severe",]$GVHD_GRADE_2 <- "Severe"
+all_jsd_meta <- all_jsd_meta[!is.na(all_jsd_meta$PTCy),]%>%
+  mutate(GVHD_GRADE_1 = ifelse(grepl("Severe", GVHD_GRADE_1), "Severe", "No and Mild"))
+all_jsd_meta$GVHD_GRADE_1 <- factor(all_jsd_meta$GVHD_GRADE_1, levels = c("No and Mild", "Severe"))
+all_jsd_meta$PTCy <- factor(all_jsd_meta$PTCy, levels = c("PTCy", "No PTCy"))
+
+
+stat_test <- all_jsd_meta%>%
+  group_by(time_bin, rep_div, PTCy)%>%
+  pairwise_wilcox_test(as.formula("unstimulated ~ GVHD_GRADE_1"), p.adjust.method = "hochberg", exact = F)%>%
+  add_xy_position(x = "time_bin")%>%
+  mutate(p.adj_2 = p.adjust(p, method = "hochberg"))
+  
+tab20_colors <- c(
+  '#1f77b4','#aec7e8','#ff7f0e','#ffbb78','#2ca02c','#98df8a','#d62728','#ff9896',
+  '#9467bd','#c5b0d5','#8c564b','#c49c94','#e377c2','#f7b6d2','#7f7f7f','#c7c7c7',
+  '#bcbd22','#dbdb8d','#17becf','#9edae5',
+  '#393b79'  # <- add one more
+)
+
+jsd_box <- ggboxplot(all_jsd_meta, x = "time_bin", y = "unstimulated", fill= "GVHD_GRADE_1")+ #Boxplots
+  geom_beeswarm(dodge.width  = 0.75, aes(group = GVHD_GRADE_1, color = PatientID), )+
+  theme_minimal()+
+  stat_pvalue_manual(stat_test, tip.length = 0)+
+  scale_fill_manual(values=c("#09BB8C","#005A8F","#B85000", "grey"))+
+  scale_color_manual(values=tab20_colors)+
+  labs( y = "Jensen Shannon Divergence", x = "Days", title = "Jensen Shannon Divergence PTCy vs No PTCy", fill = "GVHD Grade")+
+  facet_grid(rows = vars(PTCy), cols = vars(rep_div),space = "free", labeller = labeller(.col = c("All", "Alloreactive", "Non-Alloreactive")))+
+  theme(legend.position = "left",legend.text = element_text(size=16), legend.key.size = unit(12, 'pt'), strip.text.x = element_text(size = 22), axis.title.y.left = element_text(size=18), axis.title.x.bottom = element_text(size=18), title = element_text(size = 20), axis.text.x.bottom = element_text(size = 16), panel.spacing = unit(2, "lines"), axis.text.y = element_text(size = 16),strip.text.y.right = element_text(size = 16), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(color = "black"), axis.ticks = element_line(color = "black"),  axis.ticks.length = unit(0.25, "cm"))
+
+
+plot(jsd_box)
+
+ggsave(paste0(OUTPUT_PATH, '/ShannonDivergence.png'), plot = jsd_box, width = 16, height = 9, dpi = 600)
+
+```
+
+
+```{r, fig.width = 16, fig.height = 9, dpi = 600 }
+
+
+type <- "GVHD_GRADE_1"
+
+all_jsd <- data.frame()
+allo_jsd <- data.frame()
+nonallo_jsd <- data.frame()
+for(i in seq(1, length(jensen_shannon_all), 1)){
+  all <- data.frame(jensen_shannon_all[[i]])
+  allo <- data.frame(jensen_shannon_all_allo[[i]])
+  nonallo <- data.frame(jensen_shannon_all_nonallo[[i]])
+  
+  all <- all['unstimulated']
+  allo <- allo['unstimulated']
+  nonallo <- nonallo['unstimulated']
+  
+  all$timepoint <- rownames(all)
+  allo$timepoint <- rownames(allo)
+  nonallo$timepoint <- rownames(nonallo)
+  
+  all$PatientID <- sapply(str_split(filenames[i], "_"), function(x){paste0("R",x[[2]])})
+  allo$PatientID <- sapply(str_split(filenames[i], "_"), function(x){paste0("R",x[[2]])})
+  nonallo$PatientID <- sapply(str_split(filenames[i], "_"), function(x){paste0("R",x[[2]])})
+  
+  
+  all[grepl("MLR", all$timepoint),]$timepoint <- "1"
+  allo[grepl("MLR", allo$timepoint),]$timepoint <- "1"
+  nonallo[grepl("MLR", nonallo$timepoint),]$timepoint <- "1"
+  
+  all[grepl("unstim", all$timepoint),]$timepoint <- "0"
+  allo[grepl("unstim", allo$timepoint),]$timepoint <- "0"
+  nonallo[grepl("unstim", nonallo$timepoint),]$timepoint <- "0"
+  
+  all <- all%>%
+    mutate(timepoint = strtoi(timepoint))
+  allo <- allo%>%
+    mutate(timepoint = strtoi(timepoint))
+  nonallo <- nonallo%>%
+    mutate(timepoint = strtoi(timepoint))
+  
+  all_jsd <- bind_rows(all_jsd, all)
+  allo_jsd <- bind_rows(allo_jsd, allo)
+  nonallo_jsd <- bind_rows(nonallo_jsd, nonallo)
+}
+
+all_jsd$rep_div <- "All"
+allo_jsd$rep_div <- "Alloreactive"
+nonallo_jsd$rep_div <- "Non-Alloreactive"
+
+all_jsd <- bind_rows(all_jsd, allo_jsd, nonallo_jsd)
+
+all_jsd_unstim_mlr <- all_jsd[all_jsd$timepoint == 1,]
+
+all_jsd_unstim_mlr_meta <- dplyr::inner_join(all_jsd_unstim_mlr, meta_data, by = "PatientID")
+
+num_cuts <- 1 #Change this to change the binning of the timepoints
+
+all_jsd_meta <- dplyr::inner_join(all_jsd, meta_data, by = "PatientID")%>%
+  filter(rep_div != "Non-Alloreactive")#%>%
+  #mutate(PTCy = ifelse(grepl("PTCy", PTCy), "PTCy", "No PTCy"))#Modify data for plotting
+
+all_jsd_severe <- all_jsd_meta[all_jsd_meta$timepoint <= 365 & all_jsd_meta$timepoint != 0 & all_jsd_meta$timepoint > 3,]%>%
+  filter(GVHD_GRADE_1 == "Severe", !is.na(unstimulated))#get rid of timepoints before
+
+all_jsd_meta <- all_jsd_meta[all_jsd_meta$timepoint <= 365 & all_jsd_meta$timepoint != 0 & all_jsd_meta$timepoint > 3,]%>%
+  mutate( time_bin = cut(timepoint, breaks=quantile(all_jsd_severe$timepoint, probs = 0:num_cuts/num_cuts) , include.lowest = TRUE))
+
+
+all_jsd_meta <- all_jsd_meta[all_jsd_meta$timepoint <=365,]
+all_jsd_meta <- all_jsd_meta[!is.na(all_jsd_meta$PTCy),]%>%
+  mutate(GVHD_GRADE_1 = ifelse(grepl("Severe", GVHD_GRADE_1), "Severe", "No and Mild"))
+all_jsd_meta$GVHD_GRADE_1 <- factor(all_jsd_meta$GVHD_GRADE_1, levels = c("No and Mild", "Severe"))
+all_jsd_meta$PTCy <- factor(all_jsd_meta$PTCy, levels = c("PTCy", "No PTCy"))
+all_jsd_meta <- all_jsd_meta%>%
+  filter(!is.na(unstimulated))
+#   filter(PatientID != "R179")
+
+stat_test <- all_jsd_meta%>%
+  group_by(time_bin, rep_div, PTCy)%>%
+  pairwise_wilcox_test(as.formula("unstimulated ~ GVHD_GRADE_1"), p.adjust.method = "hochberg", exact = F)%>%
+  add_xy_position(x = "time_bin")%>%
+  group_by(PTCy, time_bin, rep_div)%>%
+  mutate(p.adj_2 = p.adjust(p, method = "hochberg"))%>%
+  ungroup()
+  
+
+
+jsd_box <- ggboxplot(all_jsd_meta, x = "time_bin", y = "unstimulated", fill= "GVHD_GRADE_1", outlier.shape = NA)+ #Boxplots
+  geom_beeswarm(dodge.width  = 0.75, aes(group = GVHD_GRADE_1, color = PatientID), )+
+  theme_pubr()+
+  stat_pvalue_manual(stat_test, tip.length = 0)+
+  scale_fill_manual(values=c("#058b8e", "#B85000"))+
+  # scale_color_manual(values=c("#058b8e", "#B85000"))+
+  labs( y = "Jensen Shannon Divergence", x = "Days", title = "Jensen Shannon Divergence PTCy vs No PTCy", fill = "GVHD Grade")+
+  facet_grid(rows = vars(PTCy),cols = vars(rep_div),space = "free", labeller = labeller(.col = c("All", "Alloreactive", "Non-Alloreactive")))+
+  theme(legend.position = "left",legend.text = element_text(size=12), legend.key.size = unit(20, 'pt'), strip.text.x = element_text(size = 22), axis.title.y.left = element_text(size=18), axis.title.x.bottom = element_text(size=18), title = element_text(size = 20), axis.text.x.bottom = element_text(size = 16), panel.spacing = unit(2, "lines"), axis.text.y = element_text(size = 16),strip.text.y.right = element_text(size = 16), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(color = "black"), axis.ticks = element_line(color = "black"),  axis.ticks.length = unit(0.25, "cm"))
+
+
+
+plot(jsd_box)
+
+ggsave(paste0(OUTPUT_PATH, '/ShannonDivergence.png'), plot = jsd_box, width = 16, height = 9, dpi = 600)
+
+
+```
+
+```{r}
+for(patient in unique(all_jsd_meta$PatientID)){
+#patient <- "R067"
+  print(patient)
+  curr_patient <- all_jsd_meta %>%
+    filter(PatientID == patient) %>%
+    mutate(dist_from_onset = timepoint-Onset)
+  curr_patient_before <- curr_patient %>%
+    filter(dist_from_onset < 0)
+  curr_patient_before <- curr_patient_before[curr_patient_before$dist_from_onset == max(curr_patient_before$dist_from_onset),]
+  curr_patient_after <- curr_patient %>%
+    filter(dist_from_onset >= 0)
+  curr_patient_after <- curr_patient_after[curr_patient_after$dist_from_onset == min(curr_patient_after$dist_from_onset),]
+}
+
+
+```
+
+```{r}
+
+
+data_unstimulated <- lapply(data, function(x){ #Collect all unstim timepoints from all patients
+  x <- bind_rows(x[grepl('unstim', names(x))])
+})
+
+data_mlr <- lapply(data, function(x){ # collect all mlr timepoints from all patients
+  x <- bind_rows(x[grepl('MLR', names(x))])
+})
+
+
+mat_unstim <- matrix(nrow = length(data_unstimulated), ncol = length(data_unstimulated))
+colnames(mat_unstim) <- filenames
+rownames(mat_unstim) <- filenames
+mat_mlr <- mat_unstim
+for(i in seq(1,length(data_unstimulated),1)){
+
+  for(j in seq(1,length(data_unstimulated),1)){
+    immdata_comp_unstim <- dplyr::full_join(data_unstimulated[[i]], data_unstimulated[[j]], by=unique_identifiers)%>%
+      replace_na(list(templates.x = 0, templates.y = 0))
+    mat_unstim[i,j] <- jensen_shannon(immdata_comp_unstim$templates.x, immdata_comp_unstim$templates.y)
+
+    immdata_comp_mlr <- dplyr::full_join(data_mlr[[i]], data_mlr[[j]], by=unique_identifiers)%>%
+      replace_na(list(templates.x = 0, templates.y = 0))
+    mat_mlr[i,j] <- jensen_shannon(immdata_comp_mlr$templates.x, immdata_comp_mlr$templates.y)
+  }
+}
+mat_unstim[mat_unstim == 0] <- NA
+mat_mlr[mat_mlr == 0] <- NA
+jensen_map_plot_unstim <- pheatmap(mat_unstim, color =  colorRampPalette(c("#E83F6F", "#FFFFFF", "#32936F"))(100), cluster_rows = TRUE, cluster_cols = TRUE, labels_row = filenames)
+jensen_map_plot_mlr <- pheatmap(mat_mlr, cluster_rows = TRUE, cluster_cols = TRUE, labels_row = filenames)
+# ggsave(paste0('/Users/pressm/Documents/AziziLab/GVHD/immunoseq_r/Jensen/','UnstimJensenShannonDivPlot.png'), plot = jensen_map_plot_unstim, width = 5, height = 5, dpi = 600)
+# ggsave(paste0('/Users/pressm/Documents/AziziLab/GVHD/immunoseq_r/Jensen/','MLRJensenShannonDivPlot.png'), plot = jensen_map_plot_mlr, width = 5, height = 5, dpi = 600)
+
+```
+
+```{r, fig.width = 10, fig.height = 5}
+all_pie_data <- data.frame()
+data_allo_input <- data_allo_outer
+all_allo_input <- lapply(all_allo, function(x){
+  x%>%filter(tag == 'outer')
+})
+for(i in seq(1,length(data),1)){
+  immdata_allo <- all_allo[[i]]
+  immdata_nonallo <- data_nonallo[[i]]
+  sample_meta_data <- data_meta[[i]]
+  
+  immdata_nonallo <- bind_rows(immdata_nonallo[[which(sample_meta_data[2,]== "unstimulated")[1]]], immdata_nonallo[[which(sample_meta_data[2,]== "MLRCFSElo")]])
+  
+  allo <- immdata_allo%>%
+    mutate(uID = paste0(cdr3_amino_acid, v_resolved, j_resolved))
+  
+  nonallo <- immdata_nonallo%>%
+    mutate(uID = paste0(cdr3_amino_acid, v_resolved, j_resolved))
+  
+  allo_outer <- allo %>% filter(tag == 'outer')
+  allo_inner <- allo %>% filter(tag == 'inner')
+  
+  total_allo <- length(unique(allo$uID))
+  total_nonallo <- length(unique(nonallo$uID))
+  total_allo_inner <- length(unique(allo_inner$uID))
+  total_allo_outer <- length(unique(allo_outer$uID))
+  total_clones <- total_allo + total_nonallo
+  
+  pie_data <- data.frame(prop = c((total_nonallo)/(total_clones), (total_allo_inner+total_allo_outer)/(total_clones)), groups = c('non-alloreactive clones', 'alloreactive clones'), PatientID = c(sample_meta_data[1,1],sample_meta_data[1,1]))
+  all_pie_data <-rbind(all_pie_data, pie_data)
+}
+
+all_pie_data$groups <- factor(all_pie_data$groups, levels = c('alloreactive clones','non-alloreactive clones' ))
+
+
+
+
+inter_meta <- intersect(all_pie_data$PatientID, meta_data$PatientID)
+
+meta_data_sel <- meta_data[meta_data$PatientID %in% inter_meta, ]
+meta_data_sel['amount'] <- 1
+all_pie_data <- dplyr::full_join(all_pie_data,meta_data_sel, by = "PatientID") #Join with GVHD Grade
+
+all_pie_data <- all_pie_data%>%dplyr::arrange(desc(DonorType), .by_group = TRUE)
+all_pie_data$PatientID <- factor(all_pie_data$PatientID, levels = unique(all_pie_data$PatientID))
+
+# all_pie_data$GVHD_GRADE_1 <- factor(all_pie_data$GVHD_GRADE_1, levels = c( 'No', 'Mild', 'Severe'))
+# all_pie_data <- all_pie_data%>%arrange(desc(GVHD_GRADE_1), .by_group = TRUE)
+# all_pie_data$PatientID <- factor(all_pie_data$PatientID, levels = unique(all_pie_data$PatientID))
+
+
+hlay <- rbind(c(1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,NA,NA,NA), # For sizing of graph
+              c(1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,NA,NA,NA),
+              c(NA,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2))
+percent_bar <- ggplot(all_pie_data, aes(x = PatientID , y = prop, fill = groups))+ # generating percent bar graph
+  geom_bar(stat = "identity", position = "stack")+
+   scale_fill_brewer(palette = "Set2")+
+  xlab('PatientID')+
+  ylab('Proportion of unique clones')+
+  theme_minimal()+
+  coord_cartesian(ylim = c(.70, 1))
+
+b <- ggplot(all_pie_data, aes(y = "Donor Type",x = amount, fill = DonorType, group = DonorType))+
+  geom_bar(stat = 'identity', width = .2)+
+  scale_fill_brewer(palette = "Set3")+
+  theme_void()+
+  guides()+
+  theme(legend.key.height = unit(.2, "cm"), plot.margin = margin(0, -.75, 0, .4, "cm"), legend.margin = margin(0,1,0,-.75, "cm")) + labs(fill = 'Donor Type')
+
+# b <- ggplot(all_pie_data, aes(y = "GVHD",x = amount, fill = GVHD_GRADE_1, group = GVHD_GRADE_1))+
+#   geom_bar(stat = 'identity', width = .2)+
+#   scale_fill_brewer(palette = "Set3")+
+#   theme_void()+
+#   guides()+
+#   theme(legend.key.height = unit(.2, "cm")) + labs(y = 'GVHD Grade', fill = 'GVHD Grade')
+
+unique_clone_plot <- grid.arrange(percent_bar, b,ncol = 1, heights = c(1,.2))
+
+#plot(unique_clone_plot)
+#ggsave(paste0('/Users/pressm/Documents/AziziLab/GVHD/immunoseq_r/','AllUniqueClone.png'), plot = unique_clone_plot, width = 10, height = 5, dpi = 600)
+# ggsave(paste0('/Users/pressm/Documents/AziziLab/GVHD/immunoseq_r/','AllUniqueClone_DT.pdf'), plot = unique_clone_plot, width = 10, height = 5, dpi = 600)
+# anova, if diff?
+```
+
+Patients with higher HLA mismatch are tend to have a higher proportion of alloreactive clones.
+
+```{r, fig.height = 6, fig.width = 8}
+
+all_pie_data_haplo <- all_pie_data %>%
+  mutate(DonorTypeBin = ifelse(grepl('Haplo', DonorType), 'Haplo', 'Non-Haplo'))%>%
+  subset(groups == 'alloreactive clones')
+stat.test <- t.test(subset(all_pie_data_haplo, DonorTypeBin == 'Haplo')$prop, subset(all_pie_data_haplo, DonorTypeBin == 'Non-Haplo')$prop )
+p <- ggplot(subset(all_pie_data_haplo, groups == 'alloreactive clones'), aes(x = DonorTypeBin, y = prop))+
+  geom_boxplot()+
+  geom_bracket(xmin = "Haplo", xmax = "Non-Haplo", y.position = 0.3, label = "p < 0.05", tip.length = c(0.0, 0.0))+
+  geom_beeswarm(aes(x = DonorTypeBin, y = prop, fill = DonorType, color = DonorType),size = 2, cex = 2)+
+  #geom_bracket(aes(xmin = "Haplo", xmax = "Non-Haplo", y.position = 0.3,label = signif(stat.test$p.value,2), tip.length = c(0.2, 0.4)))+
+  # geom_bracket(xmin = c("Haplo"), xmax = c("Non-Haplo"), label = signif(stat.test$p.value,2), y.position = 35)+
+  theme_minimal()
+plot(p)
+
+
+```
+
+Matched unrelated donors have a higher proportion than Matched related and sibling donor.
+
+```{r}
+#Descriptive data table
+descriptive_data <- data.frame()
+All_unique_clones <- data.frame()
+All_allo_unique_clones <- data.frame()
+All_nonall_prop <- data.frame()
+All_allo_prop <- data.frame()
+for(i in seq(1, length(data),1)){
+  immdata <- data[[i]]
+  immdata_alloreactive <- data_allo[[i]]
+  sample_meta_data <- data_meta[[i]]
+  
+  all_clones <- bind_rows(immdata, .id = 'SampleID')%>%
+    group_by(SampleID)%>%
+    dplyr::summarise(unique_clones = n())%>%
+    mutate(SampleID = unlist(sample_meta_data[2,]))
+  
+  immdata_alloreactive <- lapply(immdata_alloreactive, function(x){
+    if(length(x$timepoint) == 0){
+      x <- rbind(x,data.frame(matrix(NA, ncol = ncol(x))))
+    }else{
+      x <- x
+    }
+  })
+  
+  allo_clones <- bind_rows(immdata_alloreactive, .id = 'SampleID')%>%
+    group_by(SampleID)%>%
+    dplyr::summarise(unique_allo_clones = n())%>%
+    mutate(SampleID = unlist(sample_meta_data[2,]))
+  
+  clones <- dplyr::full_join(all_clones, allo_clones, by = 'SampleID')%>%
+    mutate(allo_prop = unique_allo_clones/unique_clones, nonallo_prop = (unique_clones - unique_allo_clones)/unique_clones)
+  
+  clones$unique_allo_clones <- as.character(clones$unique_allo_clones)
+  clones$unique_clones <- as.character(clones$unique_clones)
+  clones$allo_prop <- as.character(clones$allo_prop)
+  clones$nonallo_prop <- as.character(clones$nonallo_prop)
+
+  clones <- clones %>%
+    mutate(desc_data = paste(unique_clones, unique_allo_clones, allo_prop, nonallo_prop, sep = ", "), PatientID = sample_meta_data[1,1])
+
+clones_wide <- pivot_wider(clones, id_cols = PatientID, names_from = SampleID, values_from = desc_data)
+all_clones_wide <- pivot_wider(clones, id_cols = PatientID, names_from = SampleID, values_from = unique_clones)
+allo_clones_wide <- pivot_wider(clones, id_cols = PatientID, names_from = SampleID, values_from = unique_allo_clones)
+allo_prop_wide <- pivot_wider(clones, id_cols = PatientID, names_from = SampleID, values_from = allo_prop)
+nonallo_prop_wide <- pivot_wider(clones, id_cols = PatientID, names_from = SampleID, values_from = nonallo_prop)
+
+descriptive_data <- bind_rows(descriptive_data, clones_wide)
+All_unique_clones <- bind_rows(All_unique_clones, all_clones_wide)
+All_allo_unique_clones <- bind_rows(All_allo_unique_clones, allo_clones_wide)
+All_allo_prop <- bind_rows(All_allo_prop, allo_prop_wide)
+All_nonall_prop <- bind_rows(All_nonall_prop, nonallo_prop_wide)
+
+}
+ descriptive_data <- descriptive_data%>%
+   select('PatientID',c(sort(colnames(descriptive_data)[!grepl("^\\d+$|MLR|unstim",colnames(descriptive_data))])), 'unstimulated', 'MLRCFSElo',
+ c(as.character(sort(as.numeric(colnames(descriptive_data)[grepl("^\\d+$",colnames(descriptive_data))])))))
+ 
+ #write.csv(descriptive_data,"/Users/pressm/Documents/AziziLab/GVHD/immunoseq_r/Descriptive_Data.csv")
+
+```
+
+
+
+```{r}
+cum_freq <- function(allo_data, data){ 
+  freqs <-as.data.frame(do.call(rbind, Map(function(x, y) {
+    sum(x$frequency) / sum(y$frequency)
+  }, x = allo_data, y = data)))
+  return(freqs)
+}
+```
+
+```{r}
+avg_freq <- function(allo_data, data){ 
+  freqs <-as.data.frame(do.call(rbind, Map(function(x, y) {
+    mean(x$frequency) / sum(y$frequency)
+  }, x = allo_data, y = data)))
+  return(freqs)
+}
+```
+
+```{r}
+
+clone_frac <- function(allo_data, data){
+  as.data.frame(do.call(rbind, Map(function(x, y) {
+    nrow(x) / nrow(y)
+  }, x = allo_data, y = data)))
+}
+
+```
+
+
+```{r}
+
+n_clone <- function(allo_data, data){
+  n_clones <- as.data.frame(do.call(rbind, Map(function(x, y) {
+    nrow(x)
+  }, x = allo_data, y = data)))
+}
+
+```
+
+```{r}
+
+get_amino_arrangements <- function(immdata){#}, sample_meta_data){
+  
+  arrangements <- lapply(immdata, function(x){
+    x %>%
+      select("cdr3_amino_acid", "frequency") %>%
+      mutate(cdr3_aminolength = nchar(cdr3_amino_acid))
+  })
+  
+  arrangements <- bind_rows(arrangements, .id = "id")
+  arrangements$timepoint <- str_split_fixed(arrangements$id,"_",3)[,2]
+  arrangements$PatientID <- str_split_fixed(arrangements$id,"_",3)[,1]
+  
+  
+  aa <- AAStringSet(arrangements$cdr3_amino_acid)
+  freqs <- data.frame(alphabetFrequency(aa, as.prob = FALSE))
+  
+  arrangements <- bind_cols(arrangements, freqs)
+  
+  return(arrangements)
+}
+
+get_median_length <- function(arrangements, name){
+  med_lengths <- arrangements %>%
+    group_by(timepoint, PatientID)%>%
+    dplyr::summarise(med_cdr3aminolength = mean(cdr3_aminolength), .groups = "drop")
+  med_lengths[['Rep_div']] <- name
+  
+  return(med_lengths)
+}
+
+```
+
+
+```{r}
+
+div_fig <- function(patient_data, div, Patient){
+  #selected <- subset(patient_data, patient_data$Rep_div %in% types)
+  fig <- ggplot(patient_data, aes(SampleID,.data[[div]], group = Rep_div, color=Rep_div,shape = Rep_div)) +
+    geom_point(size = 1) +
+    geom_line() +
+    scale_y_continuous(trans='log10', labels = scales::number_format(accuracy = 0.01))+
+    labs(y = div, x = "Days Post Transplantation", title = Patient) +
+    theme_minimal()+
+    theme(axis.text.x = element_text(angle = 45, vjust = 0.5, size = 8))
+  return(fig)
+}
+
+clone_fig <- function(immdata, type, title){
+  fig <- ggplot(immdata, aes(timepoint, frequency, color = .data[[type]], group = tag)) +
+    geom_point(size = 1) + 
+    geom_line() +
+    labs(title = title)+
+    scale_y_continuous(trans = "log10", labels = scales::number_format(accuracy = 0.01)) +
+    theme_minimal(base_size = 18)+
+    theme(axis.text.x = element_text(angle = 45, vjust = 0.5, size = 8))
+  return(fig)
+}
+
+
+add_tag <- function(immdata){
+  immdata$tag <- paste(immdata$cdr3_amino_acid , immdata$v_resolved , immdata$j_resolved)
+  return(immdata)
+}
+
+convert_id <- function(immdata){
+  ids <- strsplit(immdata$id, "_")
+  immdata$timepoints <- sapply(ids, function(x) x[[2]])
+  immdata$PatientID <- sapply(ids, function(x) x[[1]])
+  return(immdata)
+}
+
+```
+
+```{r}
+str_list = c("unstimulated","MLRCFSElo")
+for (i in sort(na.omit(data.frame(strtoi(unique(data_CD48_all$timepoint))))[,1]))
+{
+  str_list <-append(str_list, toString(i))
+}
+
+
+data_CD48_all$timepoint <- factor(data_CD48_all$timepoint, level = str_list)
+data_CD48_all <- data_CD48_all[!is.na(data_CD48_all$timepoint),]
+
+
+```
+
+
+```{r, fig.height = 10, fig.width=16}
+data_allo_input <- data_allo
+all_allo_div_input <- all_allo_div
+full_allo_input <- all_full_allo
+patient_data_all = data.frame()
+all_amino = data.frame()
+allo_amino = data.frame()
+
+for(i in seq(1,length(data),1)){
+  immdata2 <- data[[i]]
+  immdata_alloreactives <- data_allo[[i]]
+  immdata_nonalloreactives <- data_nonallo[[i]]
+  allo <- data_allo_input[[i]]
+  sample_meta_data <- data_meta[[i]]
+  all_rep <- all_rep_div[[i]]
+  allo_rep <- all_allo_div_input[[i]]
+  nonallo_rep <- all_nonallo_div[[i]]
+  full_allo <- full_allo_input[[i]]
+  curr_file <- filenames[i]
+  
+  
+  #add meta data
+  all_rep$PatientID <- t(data.frame(strsplit(all_rep$ID, split = "_")))[,1]
+  all_rep$SampleID <- t(data.frame(strsplit(all_rep$ID, split = "_")))[,2]
+  all_rep$Rep_div <-"all"
+  allo_rep$PatientID <- t(data.frame(strsplit(allo_rep$ID, split = "_")))[,1]
+  allo_rep$SampleID <- t(data.frame(strsplit(allo_rep$ID, split = "_")))[,2]
+  allo_rep$Rep_div <-"allo"
+  nonallo_rep$PatientID <- t(data.frame(strsplit(nonallo_rep$ID, split = "_")))[,1]
+  nonallo_rep$SampleID <- t(data.frame(strsplit(nonallo_rep$ID, split = "_")))[,2]
+  nonallo_rep$Rep_div <-"nonallo"
+  # Plotting cumulative frequency of all allo-reactive
+  cum_freq_allo <- cum_freq(immdata_alloreactives, immdata2)
+  avg_freq_allo <- avg_freq(immdata_alloreactives, immdata2)
+  
+  # Plotting clone fraction of all allo-reactive
+  clone_fraction_allo <- clone_frac(immdata_alloreactives, immdata2)
+  
+    # Plotting clone fraction of all allo-reactive
+  n_clone_allo <- n_clone(immdata_alloreactives, immdata2)
+  
+  #Cumulative frequencies of all non-alloreactives
+  cum_freq_nonallo <- cum_freq(immdata_nonalloreactives, immdata2)
+  
+  avg_freq_nonallo <- avg_freq(immdata_nonalloreactives, immdata2)
+
+
+  #Clone fraction of all non-alloreactives
+  clone_fraction_nonallo <- clone_frac(immdata_nonalloreactives, immdata2)
+  
+  n_clone_nonallo <- n_clone(immdata_nonalloreactives, immdata2)
+  
+  #Cumulative frequences of all
+  cum_freq_all <- cum_freq(immdata2, immdata2)
+  avg_freq_all <- avg_freq(immdata2, immdata2)
+  
+  #Clone fraction of all 
+  clone_fraction_all <- clone_frac(immdata2, immdata2)
+  
+  n_clone_all <- n_clone(immdata2, immdata2)
+
+  
+  allo_rep$clone_fraction <-clone_fraction_allo$V1
+  allo_rep$cum_freq <-cum_freq_allo$V1
+  allo_rep$avg_freq <-avg_freq_allo$V1
+  allo_rep$n_clone <- n_clone_allo$V1
+  nonallo_rep$clone_fraction <-clone_fraction_nonallo$V1
+  nonallo_rep$cum_freq <-cum_freq_nonallo$V1
+  nonallo_rep$avg_freq <-avg_freq_nonallo$V1
+  nonallo_rep$n_clone <- n_clone_nonallo$V1
+  all_rep$clone_fraction <-clone_fraction_all$V1
+  all_rep$cum_freq <-cum_freq_all$V1
+  all_rep$avg_freq <-avg_freq_all$V1
+  all_rep$n_clone <- n_clone_allo$V1
+  data_patient <- rbind(allo_rep, nonallo_rep, all_rep)
+  allo_cd48 = full_allo
+  sorted_CD48_allo <- allo_cd48[order(-allo_cd48$frequency.CFSELo),] 
+  sorted_CD48_allo
+  sorted_CD48_allo$index = as.numeric(rownames(sorted_CD48_allo))
+  
+  
+  sample_list <-unique(data.frame(t(sample_meta_data))[,2])
+  
+  str_list = c("unstimulated","MLRCFSElo")
+  for (j in sort(na.omit(data.frame(strtoi(sample_list)))[,1]))
+  {
+    str_list <-append(str_list, toString(j))
+  }
+  top_allo_48 <- allo_cd48
+  
+  
+  
+  fig_data <- bind_rows(immdata_alloreactives, .id = "id")
+  fig_data <- add_tag(fig_data)
+  fig_data <- convert_id(fig_data)
+  fig_data$timepoints <- factor(fig_data$timepoints, levels=str_list)
+
+  
+  
+  # plot figures
+  allo_clone_fig <- ggplot(fig_data, aes(timepoints, frequency, group = tag, color = cell_type)) + #[fig_data$cell_type == "CD4",]
+    geom_point(size = 1) + 
+    geom_line() +
+    scale_y_continuous(trans = "log10")+
+    labs(x = curr_file, y = "Allo_Frequency") +
+    theme_minimal()
+
+  
+  selected_data <- data_patient[which(data_patient['Rep_div'] =="allo"),]
+  selected_data<- selected_data[selected_data$SampleID %in% str_list,]
+  selected_data$SampleID <- factor(selected_data$SampleID, levels=str_list)
+  selected_data_notnonallo <- data_patient#[which(data_patient['Rep_div'] !="all"),]
+  selected_data_notnonallo<- selected_data_notnonallo[selected_data_notnonallo$SampleID %in% str_list,]
+  selected_data_notnonallo$SampleID <- factor(selected_data_notnonallo$SampleID, levels=str_list)
+  
+  
+    
+  div_fig_1 <- div_fig(selected_data_notnonallo, 'clone_fraction', filenames[i])
+  div_fig_2 <- div_fig(selected_data_notnonallo, 'gini.simpson', filenames[i])
+  div_fig_3 <- div_fig(selected_data_notnonallo, 'shannons.entropy', filenames[i])
+  div_fig_4 <- div_fig(selected_data_notnonallo, 'cum_freq', filenames[i])
+  
+  fig_data_top <- dplyr::inner_join(fig_data, data.frame(tag = data_CD48_all_expand$tag), by = c('tag'))
+  
+  fig_data$timepoints <- factor(fig_data$timepoints, levels=str_list)
+
+
+  # plot figures
+  top_clone_fig = ggplot(fig_data_top, aes(timepoints, frequency, group = tag, color = cell_type)) + #[fig_data_top$cell_type == "CD4",] 
+    geom_point(size = 1) +
+    geom_line() +
+    scale_y_continuous(trans = "log10", ) +
+    labs(x = curr_file, y = "Top_allo_Frequency") +
+    theme_minimal()
+
+
+  main_fig <-(grid.arrange(allo_clone_fig,top_clone_fig,div_fig_1,div_fig_2,div_fig_3,div_fig_4))#, length_over_time_plot,boxen_plot, boxen_plot_alp, ncol = 1))
+  ggsave(paste0(OUTPUT_PATH, '/MainFig_',curr_file,'.png'), plot = main_fig, width = 16, height = 10, dpi = 600)
+  
+  patient_data_all<- rbind(patient_data_all, data_patient)
+}
+```
+
+
+```{r, fig.height = 5, fig.width = 7, dpi = 600, warning=FALSE}
+data_squished_time <- data_squished %>% #Sum the frequency and the templates per timepoint+patient
+  select(frequency, templates, timepoint, PatientID)%>%
+  group_by(timepoint, PatientID)%>%
+  dplyr::summarise(frequency = sum(frequency), templates = sum(templates), .groups = "drop")
+
+data_squished_count <- data_squished %>% #get number of unique clones
+  select(frequency, templates, timepoint, PatientID)%>%
+  dplyr::group_by(timepoint, PatientID)%>%
+  dplyr::count()
+  # select(timepoint, PatientID)
+
+data_squished_time$unique_clones <- data_squished_count$n
+
+patient_data_all_2 <- patient_data_all #Add diversity data
+colnames(patient_data_all_2)[grepl('SampleID',colnames(patient_data_all_2))] <- "timepoint"
+
+data_squished_time <- dplyr::full_join(data_squished_time, patient_data_all_2,
+               by = c("PatientID", "timepoint"))
+data_squished_time <- filter(data_squished_time, Rep_div == "all")
+
+data_squished_time <- dplyr::full_join(data_squished_time, meta_data_clin, by = "PatientID")%>%
+  mutate(timepoint = strtoi(timepoint), GVHD_GRADE_1 = ifelse(grepl("Severe", GVHD_GRADE_1), "Severe", GVHD_GRADE_1))%>%
+  filter(!is.na(timepoint))
+
+
+colnames(data_squished_time) <- sapply(colnames(data_squished_time), function(x){str_replace_all(x, "-", "")})
+data_squished_time$amount <- 1
+data_squished_time$GVHD_GRADE_1 <- factor(data_squished_time$GVHD_GRADE_1, levels = c("Severe", "Mild", "No"))
+
+
+#   
+data_squished_time$DonorType <- ifelse(data_squished_time$DonorType == "Matched Related Donor",
+                                           "Matched Unrelated Donor",
+                                           data_squished_time$DonorType)
+
+data_squished_avg <- data_squished_time%>%
+  group_by(PatientID)%>%
+  summarise(avg_div = median(na.omit(shannons.diversity)))%>%
+  ungroup()%>%
+  arrange(by_group = avg_div)
+
+data_squished_time <- data_squished_time %>%
+  mutate(PatientID = factor(PatientID, levels = unique(data_squished_avg$PatientID)))%>%
+  arrange(by_group = PatientID)
+
+data_squished_meta <- data_squished_time%>%
+  select(PatientID, PTCy, DonorType)%>%
+  distinct()%>%
+  arrange(by_group = PatientID)%>%
+  mutate(amount = 1)
+
+#this is for ptcy then grade
+b2 <- ggplot(data_squished_meta, aes(y = amount,x = "PTCy", fill = PTCy, group = desc(PatientID)))+
+  geom_bar(stat = 'identity', width = .1)+
+  scale_fill_manual(values = c("#E6BE60", "#A483AF"))+
+  theme_void()+
+  guides()+
+  theme(legend.position=c(1.03,0.35), plot.margin=margin(-0.25,-2,0.75,-2, "cm"))+
+  labs(fill = 'PTCy')
+
+b3 <- ggplot(data_squished_meta, aes(y = amount,x = "Donor Type", fill = DonorType, group = desc(PatientID)))+
+  geom_bar(stat = 'identity', width = .1)+
+  scale_fill_brewer(palette = "Set3")+
+  theme_void()+
+  guides()+
+  theme(legend.position=c(1.29,0.1), plot.margin=margin(-0.25,-2,0.75,-2, "cm"))+
+  labs(fill = 'DonorType')
+
+
+# data_squished_time$PatientID <- factor(data_squished_time$PatientID, levels = unique(data_squished_time$PatientID))
+
+dot_plots_div <- ggplot(data_squished_time, aes(x = shannons.entropy, y = PatientID, color = GVHD_GRADE_1, alpha = timepoint)) +
+  geom_point(fill = "white", color = "black", size = 4, pch = 21, alpha = 1) +
+  geom_point(aes(fill = GVHD_GRADE_1, alpha = timepoint), color = "black", size = 4, pch = 21) +
+  # scale_x_continuous(trans = "log10") +
+  scale_fill_manual(values = c("Severe" = "#B85000", "Mild" = "#005A8F", "No" = "#09BB8C")) +
+  scale_alpha_continuous(trans = "log2", name = "Days")+
+  theme_minimal() +
+  labs(title = "All", x = "Shannon's Diversity Index", fill = "GVHD Grade") +
+  theme(legend.position = c(1.28, 0.74), legend.margin = margin(-.1,-.1,-.1,-.1, "cm"), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(color = "black"), axis.ticks = element_line(color = "black"),  axis.ticks.length = unit(0.25, "cm"))
+
+dot_plots <- grid.arrange(dot_plots_div, b2 , b3, nrow = 1, widths = c(2,0.05,0.05,1))
+
+plot(dot_plots)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/All_ShannonsEntropyDotPlots.png'), plot = dot_plots, width = 7, height = 5, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/All_ShannonsEntropyDotPlots.pdf'), plot = dot_plots, width = 7, height = 5, dpi = 600)
+```
+```{r, fig.height = 5, fig.width = 7, dpi = 600, warning=FALSE}
+data_squished_time <- data_squished %>% #Sum the frequency and the templates per timepoint+patient
+  select(frequency, templates, timepoint, PatientID)%>%
+  group_by(timepoint, PatientID)%>%
+  dplyr::summarise(frequency = sum(frequency), templates = sum(templates), .groups = "drop")
+
+data_squished_count <- data_squished %>% #get number of unique clones
+  select(frequency, templates, timepoint, PatientID)%>%
+  dplyr::group_by(timepoint, PatientID)%>%
+  dplyr::count()
+  # select(timepoint, PatientID)
+
+data_squished_time$unique_clones <- data_squished_count$n
+
+patient_data_all_2 <- patient_data_all #Add diversity data
+colnames(patient_data_all_2)[grepl('SampleID',colnames(patient_data_all_2))] <- "timepoint"
+
+data_squished_time <- dplyr::full_join(data_squished_time, patient_data_all_2,
+               by = c("PatientID", "timepoint"))
+data_squished_time <- filter(data_squished_time, Rep_div == "allo")
+
+data_squished_time <- dplyr::full_join(data_squished_time, meta_data_clin, by = "PatientID")%>%
+  mutate(timepoint = strtoi(timepoint), GVHD_GRADE_1 = ifelse(grepl("Severe", GVHD_GRADE_1), "Severe", GVHD_GRADE_1))%>%
+  filter(!is.na(timepoint))
+
+
+colnames(data_squished_time) <- sapply(colnames(data_squished_time), function(x){str_replace_all(x, "-", "")})
+data_squished_time$amount <- 1
+data_squished_time$GVHD_GRADE_1 <- factor(data_squished_time$GVHD_GRADE_1, levels = c("Severe", "Mild", "No"))
+
+
+#   
+data_squished_time$DonorType <- ifelse(data_squished_time$DonorType == "Matched Related Donor",
+                                           "Matched Unrelated Donor",
+                                           data_squished_time$DonorType)
+
+data_squished_avg <- data_squished_time%>%
+  group_by(PatientID)%>%
+  summarise(avg_div = median(na.omit(shannons.diversity)))%>%
+  ungroup()%>%
+  arrange(by_group = avg_div)
+
+data_squished_time <- data_squished_time %>%
+  mutate(PatientID = factor(PatientID, levels = unique(data_squished_avg$PatientID)))%>%
+  arrange(by_group = PatientID)
+
+data_squished_meta <- data_squished_time%>%
+  select(PatientID, PTCy, DonorType)%>%
+  distinct()%>%
+  arrange(by_group = PatientID)%>%
+  mutate(amount = 1)
+
+#this is for ptcy then grade
+b2 <- ggplot(data_squished_meta, aes(y = amount,x = "PTCy", fill = PTCy, group = desc(PatientID)))+
+  geom_bar(stat = 'identity', width = .1)+
+  scale_fill_manual(values = c("#E6BE60", "#A483AF"))+
+  theme_void()+
+  guides()+
+  theme(legend.position=c(1.03,0.35), plot.margin=margin(-0.25,-2,0.75,-2, "cm"))+
+  labs(fill = 'PTCy')
+
+b3 <- ggplot(data_squished_meta, aes(y = amount,x = "Donor Type", fill = DonorType, group = desc(PatientID)))+
+  geom_bar(stat = 'identity', width = .1)+
+  scale_fill_brewer(palette = "Set3")+
+  theme_void()+
+  guides()+
+  theme(legend.position=c(1.29,0.1), plot.margin=margin(-0.25,-2,0.75,-2, "cm"))+
+  labs(fill = 'DonorType')
+
+
+# data_squished_time$PatientID <- factor(data_squished_time$PatientID, levels = unique(data_squished_time$PatientID))
+
+dot_plots_div <- ggplot(data_squished_time, aes(x = shannons.entropy, y = PatientID, color = GVHD_GRADE_1, alpha = timepoint)) +
+  geom_point(fill = "white", color = "black", size = 4, pch = 21, alpha = 1) +
+  geom_point(aes(fill = GVHD_GRADE_1, alpha = timepoint), color = "black", size = 4, pch = 21) +
+  # scale_x_continuous(trans = "log10") +
+  scale_fill_manual(values = c("Severe" = "#B85000", "Mild" = "#005A8F", "No" = "#09BB8C")) +
+  scale_alpha_continuous(trans = "log2", name = "Days")+
+  theme_minimal() +
+  labs(title = "Alloreactive", x = "Shannon's Diversity Index", fill = "GVHD Grade") +
+  theme(legend.position = c(1.28, 0.74), legend.margin = margin(-.1,-.1,-.1,-.1, "cm"), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(color = "black"), axis.ticks = element_line(color = "black"),  axis.ticks.length = unit(0.25, "cm"))
+
+
+dot_plots <- grid.arrange(dot_plots_div, b2 , b3, nrow = 1, widths = c(2,0.05,0.05,1))
+
+plot(dot_plots)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/Allo_ShannonsEntropyDotPlots.png'), plot = dot_plots, width = 7, height = 5, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/Allo_ShannonsEntropyDotPlots.pdf'), plot = dot_plots, width = 7, height = 5, dpi = 600)
+
+```
+```{r, fig.height = 5, fig.width = 7, dpi = 600, warning=FALSE}
+data_squished_time <- data_squished %>% #Sum the frequency and the templates per timepoint+patient
+  select(frequency, templates, timepoint, PatientID)%>%
+  group_by(timepoint, PatientID)%>%
+  dplyr::summarise(frequency = sum(frequency), templates = sum(templates), .groups = "drop")
+
+data_squished_count <- data_squished %>% #get number of unique clones
+  select(frequency, templates, timepoint, PatientID)%>%
+  dplyr::group_by(timepoint, PatientID)%>%
+  dplyr::count()
+  # select(timepoint, PatientID)
+
+data_squished_time$unique_clones <- data_squished_count$n
+
+patient_data_all_2 <- patient_data_all #Add diversity data
+colnames(patient_data_all_2)[grepl('SampleID',colnames(patient_data_all_2))] <- "timepoint"
+
+data_squished_time <- dplyr::full_join(data_squished_time, patient_data_all_2,
+               by = c("PatientID", "timepoint"))
+data_squished_time <- filter(data_squished_time, Rep_div == "nonallo")
+
+data_squished_time <- dplyr::full_join(data_squished_time, meta_data_clin, by = "PatientID")%>%
+  mutate(timepoint = strtoi(timepoint), GVHD_GRADE_1 = ifelse(grepl("Severe", GVHD_GRADE_1), "Severe", GVHD_GRADE_1))%>%
+  filter(!is.na(timepoint))
+
+
+colnames(data_squished_time) <- sapply(colnames(data_squished_time), function(x){str_replace_all(x, "-", "")})
+data_squished_time$amount <- 1
+data_squished_time$GVHD_GRADE_1 <- factor(data_squished_time$GVHD_GRADE_1, levels = c("Severe", "Mild", "No"))
+
+
+#   
+data_squished_time$DonorType <- ifelse(data_squished_time$DonorType == "Matched Related Donor",
+                                           "Matched Unrelated Donor",
+                                           data_squished_time$DonorType)
+
+data_squished_avg <- data_squished_time%>%
+  group_by(PatientID)%>%
+  summarise(avg_div = median(na.omit(shannons.diversity)))%>%
+  ungroup()%>%
+  arrange(by_group = avg_div)
+
+data_squished_time <- data_squished_time %>%
+  mutate(PatientID = factor(PatientID, levels = unique(data_squished_avg$PatientID)))%>%
+  arrange(by_group = PatientID)
+
+data_squished_meta <- data_squished_time%>%
+  select(PatientID, PTCy, DonorType)%>%
+  distinct()%>%
+  arrange(by_group = PatientID)%>%
+  mutate(amount = 1)
+
+#this is for ptcy then grade
+b2 <- ggplot(data_squished_meta, aes(y = amount,x = "PTCy", fill = PTCy, group = desc(PatientID)))+
+  geom_bar(stat = 'identity', width = .1)+
+  scale_fill_manual(values = c("#E6BE60", "#A483AF"))+
+  theme_void()+
+  guides()+
+  theme(legend.position=c(1.03,0.35), plot.margin=margin(-0.25,-2,0.75,-2, "cm"))+
+  labs(fill = 'PTCy')
+
+b3 <- ggplot(data_squished_meta, aes(y = amount,x = "Donor Type", fill = DonorType, group = desc(PatientID)))+
+  geom_bar(stat = 'identity', width = .1)+
+  scale_fill_brewer(palette = "Set3")+
+  theme_void()+
+  guides()+
+  theme(legend.position=c(1.29,0.1), plot.margin=margin(-0.25,-2,0.75,-2, "cm"))+
+  labs(fill = 'DonorType')
+
+
+dot_plots_div <- ggplot(data_squished_time, aes(x = shannons.entropy, y = PatientID, color = GVHD_GRADE_1, alpha = timepoint)) +
+  geom_point(fill = "white", color = "black", size = 4, pch = 21, alpha = 1) +
+  geom_point(aes(fill = GVHD_GRADE_1, alpha = timepoint), color = "black", size = 4, pch = 21) +
+  scale_fill_manual(values = c("Severe" = "#B85000", "Mild" = "#005A8F", "No" = "#09BB8C")) +
+  scale_alpha_continuous(trans = "log2", name = "Days")+
+  theme_minimal() +
+  labs(title = "Non-Alloreactive",x = "Shannon's Diversity Index", fill = "GVHD Grade") +
+  theme(legend.position = c(1.28, 0.74), legend.margin = margin(-.1,-.1,-.1,-.1, "cm"), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(color = "black"), axis.ticks = element_line(color = "black"),  axis.ticks.length = unit(0.25, "cm"))
+
+dot_plots <- grid.arrange(dot_plots_div, b2 , b3, nrow = 1, widths = c(2,0.05,0.05,1))
+
+plot(dot_plots)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/Nonallo_ShannonsEntropyDotPlots.png'), plot = dot_plots, width = 7, height = 5, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/Nonallo_ShannonsEntropyDotPlots.pdf'), plot = dot_plots, width = 7, height = 5, dpi = 600)
+
+```
+
+```{r, fig.height = 5, fig.width = 7, dpi = 600, warning=FALSE}
+data_squished_time <- data_squished %>% #Sum the frequency and the templates per timepoint+patient
+  select(frequency, templates, timepoint, PatientID)%>%
+  group_by(timepoint, PatientID)%>%
+  dplyr::summarise(frequency = sum(frequency), templates = sum(templates), .groups = "drop")
+
+data_squished_count <- data_squished %>% #get number of unique clones
+  select(frequency, templates, timepoint, PatientID)%>%
+  dplyr::group_by(timepoint, PatientID)%>%
+  dplyr::count()
+  # select(timepoint, PatientID)
+
+data_squished_time$unique_clones <- data_squished_count$n
+
+patient_data_all_2 <- patient_data_all #Add diversity data
+colnames(patient_data_all_2)[grepl('SampleID',colnames(patient_data_all_2))] <- "timepoint"
+
+data_squished_time <- dplyr::full_join(data_squished_time, patient_data_all_2,
+               by = c("PatientID", "timepoint"))
+data_squished_time <- filter(data_squished_time, Rep_div == "allo")
+
+data_squished_time <- dplyr::full_join(data_squished_time, meta_data_clin, by = "PatientID")%>%
+  mutate(timepoint = strtoi(timepoint), GVHD_GRADE_1 = ifelse(grepl("Severe", GVHD_GRADE_1), "Severe", GVHD_GRADE_1))%>%
+  filter(!is.na(timepoint))
+
+
+colnames(data_squished_time) <- sapply(colnames(data_squished_time), function(x){str_replace_all(x, "-", "")})
+data_squished_time$amount <- 1
+data_squished_time$GVHD_GRADE_1 <- factor(data_squished_time$GVHD_GRADE_1, levels = c("Severe", "Mild", "No"))
+
+
+#   
+data_squished_time$DonorType <- ifelse(data_squished_time$DonorType == "Matched Related Donor",
+                                           "Matched Unrelated Donor",
+                                           data_squished_time$DonorType)
+
+data_squished_avg <- data_squished_time%>%
+  group_by(PatientID)%>%
+  summarise(avg_div = median(na.omit(cum_freq)))%>%
+  ungroup()%>%
+  arrange(by_group = avg_div)
+
+data_squished_time <- data_squished_time %>%
+  mutate(PatientID = factor(PatientID, levels = unique(data_squished_avg$PatientID)), timepoint = ifelse(timepoint > 365, 365, timepoint),
+         Chronic = ifelse(Chronic, "Yes", "No"))%>%
+  arrange(by_group = PatientID)
+
+data_squished_meta <- data_squished_time%>%
+  select(PatientID, PTCy, DonorType, Chronic)%>%
+  distinct()%>%
+  arrange(by_group = PatientID)%>%
+  mutate(amount = 1)
+
+#this is for ptcy then grade
+b2 <- ggplot(data_squished_meta, aes(y = amount,x = "PTCy", fill = PTCy, group = desc(PatientID)))+
+  geom_bar(stat = 'identity', width = .1)+
+  scale_fill_manual(values = c("#E6BE60", "#A483AF"))+
+  theme_void()+
+  guides()+
+  theme(legend.position=c(1.03,0.35), plot.margin=margin(0.35,-2,0.8,-2, "cm"))+
+  labs(fill = 'PTCy')
+
+b3 <- ggplot(data_squished_meta, aes(y = amount,x = "Donor Type", fill = DonorType, group = desc(PatientID)))+
+  geom_bar(stat = 'identity', width = .1)+
+  scale_fill_brewer(palette = "Set3")+
+  theme_void()+
+  guides()+
+  theme(legend.position=c(1.29,0.1), plot.margin=margin(0.35,-2,0.8,-2, "cm"))+
+  labs(fill = 'DonorType')
+
+b4 <- ggplot(data_squished_meta, aes(y = amount,x = "Chronic ", fill = Chronic, group = desc(PatientID)))+
+  geom_bar(stat = 'identity', width = .1)+
+  scale_fill_manual(values = c("#48A4E3", "#BF6196"))+
+  theme_void()+
+  guides()+
+  theme(legend.position=c(1.45,0.35), plot.margin=margin(0.35,-2,0.8,-2, "cm"))+
+  labs(fill = 'Chronic')
+
+dot_plots_div <- ggplot(data_squished_time, aes(x = cum_freq, y = PatientID, color = GVHD_GRADE_1, alpha = timepoint)) +
+  geom_point(fill = "white", color = "black", size = 4, pch = 21, alpha = 1) +
+  geom_point(aes(fill = GVHD_GRADE_1, alpha = timepoint), color = "black", size = 4, pch = 21) +
+  scale_color_gradient(low = "white", high = "black") +
+  scale_x_continuous(trans = "log10", labels = scales::number_format(accuracy = 0.00001)) +
+  scale_fill_manual(values = c("Severe" = "#B85000", "Mild" = "#005A8F", "No" = "#09BB8C")) +
+  # scale_alpha_continuous(trans = "log10")+
+  guides(alpha = FALSE) +
+  theme_minimal() +
+  labs(title = "Alloreactive T Cell Clones", x = "Cumulative Frequency", fill = "GVHD Grade", alpha = "Days") +
+  theme(legend.position = c(1.28, 0.59), legend.margin = margin(-.1,-.1,-.1,-.1, "cm"), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(color = "black"), axis.ticks = element_line(color = "black"),  axis.ticks.length = unit(0.25, "cm"))
+
+dummy_plot <- ggplot(data_squished_time, aes(x = 1, y = timepoint, fill = timepoint)) +
+  geom_tile() +
+  scale_fill_gradient( low = "white", high = "black",
+                      breaks = c(100,200, 300, 365), # Specify your desired breaks
+                         labels = c("100","200","300", "365+")) +
+  theme_void()+
+  labs(fill = "Days")
+legend_timeplots <- plot_grid(plotlist = list(NULL, cowplot::get_legend(dummy_plot), NULL, NULL), nrow = 1, rel_widths = c(0.0001, 1), rel_heights = c(.1,1))
+
+ggsave(paste0(OUTPUT_PATH, '/Figure1/legendtimeplot.png'), plot = legend_timeplots, width = 7, height = 5, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1/legendtimeplot.pdf'), plot = legend_timeplots, width = 7, height = 5, dpi = 600)
+
+dot_plots <- grid.arrange(dot_plots_div, b2 , b3, b4, nrow = 1, widths = c(2,0.05,0.05,0.05, 0.05,1))
+
+plot(legend_timeplots)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure1/AlloFrequnceyDotPlot.png'), plot = dot_plots, width = 7, height = 5, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1/AlloFrequnceyDotPlot.pdf'), plot = dot_plots, width = 7, height = 5, dpi = 600)
+```
+
+```{r save_state}
+saveRDS(patient_data_all, file.path(PROCESSED_DATA_PATH, "patient_data_all_df.rds"))
+cat("Saved: patient_data_all_df.rds\n")
+saveRDS(data_squished_time, file.path(PROCESSED_DATA_PATH, "data_squished_time.rds"))
+cat("Saved: data_squished_time.rds\n")
+saveRDS(patient_data_all_2, file.path(PROCESSED_DATA_PATH, "patient_data_all_2.rds"))
+cat("Saved: patient_data_all_2.rds\n")
+saveRDS(data_all_squished, file.path(PROCESSED_DATA_PATH, "data_all_squished_proc.rds"))
+cat("Saved: data_all_squished_proc.rds\n")
+```

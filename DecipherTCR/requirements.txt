@@ -184,7 +184,7 @@ tensorboard-data-server==0.7.2
 tensorstore==0.1.69
 termcolor==2.5.0
 terminado==0.18.1
-texttable @ file:///home/conda/feedstock_root/build_artifacts/texttable_1734145585512/work
+texttable==1.7.0
 threadpoolctl==3.5.0
 tifffile==2025.3.30
 tinycss2==1.4.0

@@ -1,0 +1,5 @@
+anndata==0.11.1
+scanpy==1.10.4
+matplotlib==3.9.3
+scirpy==0.22.0
+muon==0.1.7

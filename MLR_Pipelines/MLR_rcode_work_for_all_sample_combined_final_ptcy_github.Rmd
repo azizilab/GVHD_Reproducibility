@@ -1,0 +1,3218 @@
+---
+title: "TCR Repertoire Analysis: PTCy GVHD Alloreactive Clone Dynamics"
+author: "GVHD Project"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+# Overview
+
+This notebook analyzes T-cell receptor (TCR) repertoire dynamics in patients receiving post-transplant cyclophosphamide (PTCy). The analysis focuses on alloreactive clone tracking, diversity metrics, and GVHD grade associations.
+
+# Setup
+
+## Environment Initialization
+
+```{r setup, message=FALSE, warning=FALSE}
+# Clear environment
+gc() 
+rm(list = ls())
+```
+
+## Load Required Libraries
+
+```{r libraries, message=FALSE, warning=FALSE}
+library(cdr3tools)      # TCR sequence analysis
+library(tidyverse)      # Data manipulation
+library(eulerr)         # Venn diagrams
+library(pheatmap)       # Heatmaps
+library(factoextra)     # PCA and clustering
+library(KneeArrower)    # Elbow detection
+library(ggplot2)        # Plotting
+library(gridExtra)      # Multiple plots
+library(lvplot)         # Letter value plots
+library(MGLM)           # Multinomial regression
+library(readxl)         # Excel file reading
+library(ggpubr)         # Publication-ready plots
+library(purrr)          # Functional programming
+library(dplyr)          # Data wrangling
+library(patchwork)      # Combining plots
+library(ggbeeswarm)     # Beeswarm plots
+library(docstring)      # Documentation
+library(ggalluvial)     # Alluvial diagrams
+library(plotly)         # Interactive plots
+library(rstatix)        # Statistical tests
+library(tidymodels)     # Modeling framework
+library(cowplot)        # Plot arrangements
+library(ggtext)         # Rich text in plots
+```
+
+## Data Path Configuration
+
+```{r data_path}
+# Set path to annotated patient data
+path <- "/Users/lingtingshi/Documents/Annotated_v4_ptcy/" 
+setwd(path)
+filenames <- list.files(path)
+```
+
+# Helper Functions
+
+## Combine Immunoseq Files
+
+```{r func_combine_immuno}
+
+combine_immuno <- function(immdata, sample_meta_data, comb_idx, unique_identifiers){ 
+  #' Combine immunoseq files from the same timepoint
+  #' 
+  #' @description This function combines n immunoseq 
+  #' files from the same timepoint that are given from Adaptive Immunoseq.
+  #' The file names must be in format PatientID_timepoint_celltype
+  #' 
+  #' @param immdata List of dataframes containing the data from immunoseq files.
+  #' Dataframes are obtained through the function read_immunoseq
+  #' @param sample_meta_data 3 by sample dataframe that contains PatientID in first row,
+  #' timepoint in second row, and cell type in the third row
+  #' @param comb_idx the indices of the samples you would like to combine
+  #' @param unique_identifiers Columns in immdata that identify unique clones (eg. cdr3_amino_acid, v_resolved, j_resolved)
+  #' @usage combine_immuno(immdata, sample_meta_data, comb_idx, unique_identifiers)
+  #' @return updated: list(immdata, sample_meta_data)
+  
+  
+  
+  cd4 <- immdata[[comb_idx[1]]] #initialize dataframe to be combined into
+  cd4$cell_type<- sample_meta_data[3,comb_idx[1]] #set the cell_type of that dataframe
+  for(i in seq(2,length(comb_idx),1)){ #for every other datafram identify by the indices combine into the first dataframe
+    cd <- immdata[[comb_idx[i]]]
+    cd$cell_type <- sample_meta_data[3, comb_idx[i]]
+    cd4 <- dplyr::full_join(cd4,cd, by = c(unique_identifiers, "PatientID", "timepoint"))%>%
+      replace_na(list(frequency.x = 0, frequency.y = 0,templates.x = 0, templates.y = 0, cell_type.x = "", cell_type.y = ""))
+    cd4$templates <- cd4$templates.x+ cd4$templates.y #Add the templates of the same clones together
+    cd4$frequency <- cd4$templates/sum(cd4$templates) #Recalculate the frequency
+    cd4$cell_type <- gsub(" ", "",paste(gsub(" ", "",cd4$cell_type.x), gsub(" ", "", cd4$cell_type.y)))
+    cd4 <- cd4 %>% select(all_of(c(unique_identifiers, "frequency", "templates", "PatientID", "timepoint", "cell_type")))
+    immdata[[comb_idx[1]]] <- cd4
+  }
+  sample_meta_data[3,comb_idx[1]] <- "both" #change the first dataframes description to be both
+  comb_idx <- comb_idx[-1] #remove the first indices from the indices
+  immdata <- immdata[-comb_idx] #remove the dataframes that were combined from immdata
+  sample_meta_data <- sample_meta_data[,-comb_idx] #remove the samples that were combined from sample_meta_data
+  
+  return(list(immdata, sample_meta_data))
+  
+}
+```
+
+```{r}
+determine_cell_type <- function(cell_type.unstim, cell_type.CFSElo){
+  if(cell_type.unstim == "CD4CD8" & cell_type.CFSElo != "CD4CD8"){
+    return (cell_type.CFSElo)
+  } else if(cell_type.CFSElo == "CD4CD8" & cell_type.unstim != "CD4CD8"){
+    return (cell_type.unstim)
+  } else if(cell_type.unstim != "CD4CD8" & cell_type.unstim != "CD4CD8"){
+    if(cell_type.CFSElo == cell_type.unstim)
+    {
+      return(cell_type.CFSElo)
+    } 
+    else
+    {
+      return("CD4CD8")
+    }
+  }
+  
+  return("CD4CD8")
+}
+
+```
+
+## Process Patient Data
+
+```{r func_process_data}
+
+process_data <- function(filename, path, unique_identifiers = c("cdr3_amino_acid", "v_resolved", "j_resolved")){
+  #' Process patient immunoseq folder
+  #' 
+  #' @description This function takes a patients immunoseq folder and iterates
+  #' through each file extracting the needed information and combining files that 
+  #' are from the same timepoint. Once files are combined alloreactive clones
+  #' are determined and returned.
+  #' 
+  #' @param filename name of patient folder
+  #' @param path to folder that contains all patients
+  #' @param unique_identifiers Columns in immdata that identify unique clones (eg. cdr3_amino_acid, v_resolved, j_resolved)
+  #' @return list(immdata2, sample_meta_data, allo, nonallo)
+  
+  # Load patient data
+  
+  immdata <- read_immunoseq(paste(path, filename,"/",sep = ""))
+  immdata2 <- lapply(immdata, function(x) {
+  x %>%
+    dplyr::group_by(across(all_of(unique_identifiers))) %>% #Combine any duplicates and drop any unnecessary rows 
+    dplyr::summarise(templates = sum(templates), .groups = "drop") %>%
+    mutate(frequency = templates / sum(templates)) %>%
+    dplyr::arrange(dplyr::desc(frequency))  
+    })
+  
+
+  immdata1 <- map2( #Map PatientID to clones
+    immdata2,
+    data.frame(strsplit(names(immdata), split = "_"))[1,],
+    ~ mutate(.x, PatientID = .y)
+  )
+  immdata2 <- map2( #map time to each sample
+    immdata1,
+    data.frame(strsplit(names(immdata), split = "_"))[2,],
+    ~ mutate(.x, timepoint = .y)
+  )
+  
+  # get metadata
+  sample_names = rownames(summary(immdata))
+  sample_meta_data <-data.frame(strsplit(sample_names, split = "_"))
+  sample_meta_data
+  
+  
+  Treg_idx <- grep('Treg', sample_meta_data[3,]) #Combine Treg
+  if(length(Treg_idx) > 1){
+    result <- combine_immuno(immdata2, sample_meta_data, Treg_idx, unique_identifiers)
+    immdata2 <- result[[1]]
+    sample_meta_data <- result[[2]]
+  }
+  
+  MAX_ITER <-50 #may need to change if you are combining over 50 samples
+  iter <- 0
+  j <- 1
+  while(j <= length(sample_meta_data[2,]) & iter < MAX_ITER){ #Combine and CD4 and CD8 that have the same timepoints
+
+    time_idx <- which(sample_meta_data[2,] == sample_meta_data[2,j])
+    if (length(time_idx) > 1){ #If there is one CD4 or CD8 Change to both
+      result <- combine_immuno(immdata2, sample_meta_data, time_idx, unique_identifiers)
+      immdata2 <- result[[1]]
+      sample_meta_data <- result[[2]]
+      #Ensure Cell type labeling is good
+      # immdata2[[j]] <- immdata2[[j]] %>%
+      #   mutate(cell_type = ifelse(grepl("CD3", cell_type), gsub("CD3 & CD8")))
+      
+    }else{
+      if (sample_meta_data[3,j] != "both") {
+        cd48 <- immdata2[[j]]
+        cd48 <- cd48 %>%
+          subset(select = c(unique_identifiers, "frequency", "templates", "PatientID", "timepoint"))
+        cd48$cell_type <- sample_meta_data[3,j]
+        immdata2[[j]] <- cd48
+        sample_meta_data[3,j] = "both"
+      }else{
+        #print("Already Both")
+        immdata2[[j]]$cell_type = "CD4CD8"
+      }
+    }
+    iter <- iter + 1
+    j <- j + 1
+  }
+  
+  unstim_idx <- which(sample_meta_data[2,] == 'unstimulated')
+  MLRCF_idx <- which(sample_meta_data[2,] == 'MLRCFSElo')
+  
+  allo_inner <- dplyr::inner_join(immdata2[[MLRCF_idx]],immdata2[[unstim_idx]],
+                           by = c(unique_identifiers, "PatientID"), 
+                           suffix = c(".CFSELo", ".unstim")
+  ) %>%
+    replace_na(list(frequency.unstim = 0, frequency.CFSELo = 0)) %>%
+    filter(frequency.CFSELo >= 2 * frequency.unstim)%>%
+    select(unique_identifiers, "frequency.CFSELo", "frequency.unstim", "templates.CFSELo", "templates.unstim", "PatientID", "cell_type.CFSELo")
+  allo_inner['tag'] <- 'inner'
+  colnames(allo_inner)[colnames(allo_inner) == "cell_type.CFSELo"] <- "cell_type"
+  
+  allo_outer <- dplyr::anti_join(immdata2[[MLRCF_idx]],immdata2[[unstim_idx]],
+                          by = c(unique_identifiers), 
+  ) %>%
+    replace_na(list(frequency = 0)) %>%
+    filter(frequency >= 1e-5)%>%
+    select(unique_identifiers, "frequency", "templates", "PatientID", "cell_type")
+  names(allo_outer)[names(allo_outer) == 'frequency'] <- 'frequency.CFSELo'
+  names(allo_outer)[names(allo_outer) == 'templates'] <- 'templates.CFSELo'
+  allo_outer['frequency.unstim'] <- 0
+  allo_outer['templates.unstim'] <- 0
+  allo_outer['tag'] <- 'outer'
+  allo <- bind_rows(allo_inner, allo_outer)
+  
+  nonallo_unstim <- dplyr::anti_join(immdata2[[unstim_idx]], allo, by = c(unique_identifiers))%>%
+    replace_na(list(frequency = 0))%>%
+    select(unique_identifiers, "frequency", "templates", "PatientID", "cell_type")
+
+  nonallo_mlr <- dplyr::anti_join(immdata2[[MLRCF_idx]], allo, by = c(unique_identifiers))%>%
+    replace_na(list(frequency = 0))%>%
+    select(unique_identifiers, "frequency", "templates", "PatientID", "cell_type")
+
+  nonallo <- dplyr::full_join(nonallo_unstim, nonallo_mlr, 
+                              by = c(unique_identifiers, "PatientID"),
+                              suffix = c(".unstim", ".CFSElo"))%>%
+    replace_na(list(frequency.unstim = 0, frequency.CFSElo = 0, 
+                    templates.unstim = 0, templates.CFSElo = 0))%>%
+    mutate(cell_type.unstim = gsub("CD3", "", cell_type.unstim), cell_type.CFSElo = gsub("CD3", "", cell_type.CFSElo))%>%
+    mutate(cell_type.unstim = ifelse(is.na(cell_type.unstim), cell_type.CFSElo, cell_type.unstim), cell_type.CFSElo = ifelse(is.na(cell_type.CFSElo), cell_type.unstim, cell_type.CFSElo))%>%
+    mutate(cell_type.CFSElo = gsub("CD3", "", cell_type.CFSElo ), cell_type.unstim = gsub("CD3","", cell_type.unstim))%>%
+    mutate(cell_type.CFSElo = gsub("both", "CD4CD8", cell_type.CFSElo ), cell_type.unstim = gsub("both","CD4CD8", cell_type.unstim))%>%
+    mutate(cell_type.CFSElo = gsub("tsv", "CD4CD8", cell_type.CFSElo ), cell_type.unstim = gsub("tsv","CD4CD8", cell_type.unstim))%>%
+    mutate(cell_type.CFSElo = ifelse(cell_type.CFSElo == "", "CD4CD8", cell_type.CFSElo), cell_type.unstim = ifelse(cell_type.unstim == "", "CD4CD8", cell_type.unstim))%>%
+    rowwise()%>%
+    mutate(cell_type = determine_cell_type(cell_type.CFSElo, cell_type.unstim))
+  # %>%
+  #   mutate(cell_type = paste(ifelse((cell_type.unstim), "", cell_type.unstim), ifelse(is.na(cell_type.CFSElo), "", cell_type.CFSElo)))%>%
+  #   mutate(cell_type = paste(ifelse(grepl("8",cell_type), "CD8", ""),ifelse(grepl("4",cell_type), "CD4", ""), ifelse(grepl("3",cell_type), "CD3", "") ))#%>%
+  #   #select(all_of(c(unique_identifiers, "cell_type")))
+
+  return(list(immdata2, sample_meta_data, allo, nonallo))
+}
+
+```
+
+Here we are processing the immunoseq files. The process data function: - Combines duplicate clones - Combines timepoints that are split into CD4 and CD8 and recalculates frequencies - Removes tissue timeopints - Determine Alloreactive and Nonalloreactive clones
+
+```{r}
+data <- vector("list", length(filenames))
+data_meta<- vector("list", length(filenames))
+all_allo <- vector("list", length(filenames))
+all_nonallo <- vector("list",  length(filenames))
+unique_identifiers <- c("cdr3_amino_acid", "v_resolved", "j_resolved") #Set to what you want to classify as unique clone
+
+#Read all data and map to corresponding list
+for (file_num in seq(1,length(filenames), 1)) {
+  results <- process_data(filenames[file_num], path, unique_identifiers)
+  data[[file_num]] <- results[[1]]
+  data_meta[[file_num]] <- results[[2]]
+  all_allo[[file_num]] <- results[[3]]
+  all_nonallo[[file_num]] <- results[[4]]
+}
+# nonallo_csv <- bind_rows(all_nonallo)
+# write.csv(nonallo_csv, file = "/Users/pressm/Documents/AziziLab/GVHD/immunoseq_r/nonallo.csv")
+# allo_csv <- bind_rows(all_allo)
+# write.csv(allo_csv, file = "/Users/pressm/Documents/AziziLab/GVHD/immunoseq_r/allo.csv")
+
+
+```
+
+```{r}
+all_full_allo <- vector("list", length(filenames))
+for(i in seq(1,length(data),1)){ #Get list of Allo and Nonallo clones
+  immdata2 <- data[[i]]
+  allo <- all_allo[[i]]
+  nonallo <- all_nonallo[[i]]
+  sample_meta_data <- data_meta[[i]]
+  
+  full_allo_inner <- subset(allo, allo$tag == 'inner')
+  allo_inner <- full_allo_inner%>%
+    subset(select =  unique_identifiers)
+  
+  full_allo_outer <- subset(allo, allo$tag == 'outer')
+  allo_outer <- full_allo_outer%>%
+    subset(select =  unique_identifiers)
+  
+  all_full_allo[[i]] <- bind_rows(full_allo_inner, full_allo_outer)
+}
+```
+
+To asses how clones diversity, we use the repertoire diversity function to calculate diversity at each timepoint.
+```{r}
+#We are calculating the diversity metrics for alloreactive, nonalloreactive and all clones
+data_all <- vector("list", length(filenames))
+data_allo <- vector("list", length(filenames))
+data_allo_w0 <- vector("list", length(filenames)) #Storing when alloreactive clones are 0. Can't calculate diversity metric with 0s.
+data_allo_inner <- vector("list", length(filenames))
+data_allo_outer <- vector("list", length(filenames))
+data_allo_10 <- vector("list", length(filenames))
+data_nonallo <- vector("list", length(filenames))
+all_nonallo_div_CD4 <- vector("list", length(filenames))
+all_nonallo_div_CD8 <- vector("list", length(filenames))
+data_nonallo_w0 <- vector("list", length(filenames)) #Storing when alloreactive clones are 0. Can't calculate diversity metric with 0s.
+all_allo_div <- vector("list", length(filenames))
+all_allo_div_CD4 <- vector("list", length(filenames))
+all_allo_div_CD8 <- vector("list", length(filenames))
+all_allo_inner_div <- vector("list", length(filenames))
+all_allo_outer_div <- vector("list", length(filenames))
+all_nonallo_div <- vector("list", length(filenames))
+all_rep_div <- vector("list", length(filenames))
+
+
+
+for(i in seq(1,length(data),1)){ #iterate through each patient and calculate diveristy metrics
+  immdata2 <- data[[i]]
+  allo <- all_allo[[i]]
+  nonallo <- all_nonallo[[i]]
+  sample_meta_data <- data_meta[[i]]
+  
+  
+  
+  full_allo_inner <- subset(allo, allo$tag == 'inner')
+  allo_inner <- full_allo_inner%>%
+    subset(select =  c(unique_identifiers, "PatientID"))
+  
+  full_allo_outer <- subset(allo, allo$tag == 'outer')
+  allo_outer <- full_allo_outer%>%
+    subset(select =  c(unique_identifiers, "PatientID"))
+  
+  
+  
+  allo <- allo %>% subset(select =  c(unique_identifiers, "cell_type")) # Separate out CD4 and CD8 to calculate metric on each.
+  allo_CD4 <- allo[grepl("4", allo$cell_type) & !grepl("8", allo$cell_type),]
+  allo_CD8 <- allo[grepl("8", allo$cell_type) & !grepl("4", allo$cell_type),]
+  
+  nonallo <- nonallo%>%
+    subset(select =c(unique_identifiers, "cell_type", "PatientID"))
+  nonallo_CD4 <- nonallo[grepl("4", nonallo$cell_type) & !grepl("8", nonallo$cell_type),]
+  nonallo_CD8 <- nonallo[grepl("8", nonallo$cell_type) & !grepl("4", nonallo$cell_type),]
+  
+  all <- bind_rows(allo, nonallo)
+  immdata_all <- lapply(immdata2, function(x){
+    x%>%
+      dplyr::inner_join(all, by = unique_identifiers)%>%
+      mutate(cell_type = cell_type.y)%>%
+      subset(select = -c(cell_type.x, cell_type.y))
+  })
+  
+  all_rep_div[[i]] <-repertoire_diversity(immdata_all)
+  
+  immdata_alloreactives <- lapply(immdata2, function(x) {
+      x%>%
+      dplyr::inner_join(allo, by =  unique_identifiers)%>%
+      mutate(cell_type = cell_type.y)%>%
+      subset(select = -c(cell_type.x, cell_type.y))
+  })
+  
+  immdata_alloreactives_w0 <- lapply(immdata2, function(x) {
+      curr_timepoint <- unique(x$timepoint)
+      x%>%
+      dplyr::right_join(allo, by =  unique_identifiers)%>%
+      mutate(cell_type = ifelse(is.na(cell_type.y), "CD4 CD8", cell_type.y),
+             templates = ifelse(is.na(templates), 0, templates),
+             frequency = ifelse(is.na(frequency), 0, frequency),
+             PatientID = sample_meta_data[1,1],
+             timepoint = curr_timepoint)%>%
+      subset(select = -c(cell_type.x, cell_type.y))
+  })
+  
+  immdata_alloreactives_CD4 <- lapply(immdata2, function(x) {
+      x%>%
+      dplyr::inner_join(allo_CD4, by =  unique_identifiers)%>%
+      mutate(cell_type = cell_type.y)%>%
+      subset(select = -c(cell_type.x, cell_type.y))
+  })
+  immdata_alloreactives_CD8 <- lapply(immdata2, function(x) {
+      x%>%
+      dplyr::inner_join(allo_CD8, by =  unique_identifiers)%>%
+      mutate(cell_type = cell_type.y)%>%
+      subset(select = -c(cell_type.x, cell_type.y))
+  })
+
+  all_allo_div[[i]] <-repertoire_diversity(immdata_alloreactives)
+  all_allo_div_CD4[[i]] <-repertoire_diversity(immdata_alloreactives_CD4)
+  all_allo_div_CD8[[i]] <-repertoire_diversity(immdata_alloreactives_CD8)
+  
+  
+  #List of alloreactives
+  immdata_alloreactives_inner <- lapply(immdata2, function(x) {
+    x <- dplyr::inner_join(allo_inner, x, by =  unique_identifiers)
+  })
+  
+  
+  # repertoire diversity of allo-reactives
+  all_allo_inner_div[[i]] <-repertoire_diversity(immdata_alloreactives_inner)
+  
+  #List of alloreactives
+  immdata_alloreactives_outer <- lapply(immdata2, function(x) {
+    x <- dplyr::inner_join(allo_outer, x, by =  unique_identifiers)
+  })
+  
+  # repertoire diversity of allo-reactives
+  all_allo_outer_div[[i]] <-repertoire_diversity(immdata_alloreactives_outer)
+  
+  
+  
+  # List of non-alloreactives
+  immdata_nonalloreactives <- lapply(immdata2, function(x) {
+    x %>% 
+      dplyr::inner_join(nonallo, by =  unique_identifiers)%>%
+      mutate(cell_type = cell_type.y)%>%
+      subset(select = -c(cell_type.x, cell_type.y))
+  })
+  
+  immdata_nonalloreactives_CD4 <- lapply(immdata2, function(x) {
+      x%>%
+      dplyr::inner_join(nonallo_CD4, by =  unique_identifiers)%>%
+      mutate(cell_type = cell_type.y)%>%
+      subset(select = -c(cell_type.x, cell_type.y))
+  })
+  immdata_nonalloreactives_CD8 <- lapply(immdata2, function(x) {
+      x%>%
+      dplyr::inner_join(nonallo_CD8, by =  unique_identifiers)%>%
+      mutate(cell_type = cell_type.y)%>%
+      subset(select = -c(cell_type.x, cell_type.y))
+  })
+  
+  immdata_nonalloreactives_w0 <- lapply(seq_along(immdata2), function(x) {
+      immdata2[[x]]%>%
+      dplyr::right_join(nonallo, by =  c(unique_identifiers, "PatientID"))%>%
+      mutate(cell_type = cell_type.y,
+             templates = ifelse(is.na(templates), 0, templates),
+             frequency = ifelse(is.na(frequency), 0, frequency),
+             PatientID = strsplit(names(immdata2)[x], "_")[[1]][1],
+             timepoint = strsplit(names(immdata2)[x], "_")[[1]][2])%>%
+      subset(select = -c(cell_type.x, cell_type.y))
+  })
+  names(immdata_nonalloreactives_w0) = names(immdata2)
+  
+  # repertoire diversity of non-allo-reactives
+  all_nonallo_div[[i]]<-repertoire_diversity(immdata_nonalloreactives)
+  all_nonallo_div_CD4[[i]]<-repertoire_diversity(immdata_nonalloreactives_CD4)
+  all_nonallo_div_CD8[[i]]<-repertoire_diversity(immdata_nonalloreactives_CD8)
+  
+  # List of top 10 non-alloreactives
+  immdata_nonalloreactives_top10 <- lapply(immdata2, function(x) {
+    x %>% 
+      dplyr::anti_join(allo, by =  unique_identifiers) %>% 
+      arrange(desc(frequency)) %>% 
+      slice_head(n = 10)
+  })
+  
+  # List of top 10 alloreactives
+  immdata_alloreactives_top10 <- lapply(immdata2, function(x) {
+    x %>% 
+      dplyr::inner_join(allo, by =  unique_identifiers) %>%
+      arrange(desc(frequency)) %>% 
+      slice_head(n = 10)
+  })
+  data_all[[i]] <- immdata_all
+  data_nonallo[[i]] <- immdata_nonalloreactives
+  data_nonallo_w0[[i]] <- immdata_nonalloreactives_w0
+  data_allo[[i]] <- immdata_alloreactives
+  data_allo_w0[[i]] <- immdata_alloreactives_w0
+  data_allo_inner[[i]] <- immdata_alloreactives_inner
+  data_allo_outer[[i]] <- immdata_alloreactives_outer
+  data_allo_10[[i]]<- immdata_alloreactives_top10
+}
+```
+
+```{r}
+meta_data <- read_excel("/Users/lingtingshi/Documents/TCR_Project_updated_forPTCY.xlsx", sheet = 'Patient Metadata')%>%
+  mutate(PatientID = gsub("[^0-9.-]", "R", PatientID), PTCy = ifelse(grepl("PTCy", PTCy), "PTCy", "No PTCy"))
+
+# meta_data <- read_excel("/Users/pressm/Documents/AziziLab/GVHD/immunoseq_r/TCR_Project.xlsx", sheet = 'Patient Metadata')
+meta_data <- meta_data[1:34, ]
+meta_data$PatientID <- paste("R", sprintf("%03d", as.integer(substring(meta_data$PatientID, 2))), sep = "")
+
+```
+
+
+```{r}
+full_allo_input <- all_full_allo #determine the expanded clones
+elbow <- vector("list", length(filenames))
+expanded_clones <- vector("list", length(filenames))
+for(i in seq(1,length(data),1)){
+  full_allo <- full_allo_input[[i]]
+  allo_cd48 = full_allo
+  
+  sorted_CD48_allo <-allo_cd48[order(-allo_cd48$frequency.CFSELo),] 
+  simple_cutoff <- data.frame(findCutoff(as.numeric(rownames(sorted_CD48_allo)), sorted_CD48_allo$frequency.CFSELo))
+  lo <- loess(sorted_CD48_allo$frequency.CFSELo~as.numeric(rownames(sorted_CD48_allo)), span = 0.4, degree = 1)
+  line_data <- data.frame(y = predict(lo), x = seq_along(predict(lo)))
+  lo_cutoff <- data.frame(findCutoff(as.numeric(rownames(sorted_CD48_allo)), predict(lo,as.numeric(rownames(sorted_CD48_allo))), method = "curvature"))
+  
+  expanded_plot <- ggplot(sorted_CD48_allo, aes(x = seq_along(frequency.CFSELo), y = frequency.CFSELo))+
+    geom_point()+
+    geom_line(data = line_data, color = "red", size = 1, aes(x = x, y = y))+
+    geom_point(data = simple_cutoff, color = "black", size = 2, aes(x = x, y = y))+
+    geom_point(data = lo_cutoff, color = "red", size = 2, aes(x = x, y = y))+
+    theme_pubr()+
+    labs(title = filenames[i])
+  # plot(as.numeric(rownames(sorted_CD48_allo)), sorted_CD48_allo$frequency.CFSELo, main = filenames[i])
+
+  plot(expanded_plot)
+  
+  ggsave(filename = paste0("/Users/lingtingshi/Documents/GVHD_project/From_Michael/MLR_Pipeline/Main_fig//expanded_plot_", filenames[i], ".png"), 
+         plot = expanded_plot, width = 4, height = 3, units = "in", dpi = 300)
+  ggsave(filename = paste0("/Users/lingtingshi/Documents/GVHD_project/From_Michael/MLR_Pipeline/Main_fig//expanded_plot_", filenames[i], ".pdf"), 
+         plot = expanded_plot, width = 4, height = 3, units = "in", dpi = 300)
+
+  
+  
+  elbow[[i]] <-findCutoff(as.numeric(rownames(sorted_CD48_allo)), predict(lo,as.numeric(rownames(sorted_CD48_allo))),  method = "curvature")
+  top_allo_48 <-allo_cd48[allo_cd48$frequency.CFSELo >= elbow[[i]]$y,]
+  expanded_clones[[i]] <- top_allo_48
+  
+
+}
+
+```
+
+
+
+```{r}
+# Function to count unique MLRCFSElo tags by patient ID
+count_unique_tags_by_patient <- function(data_allo) {
+  # Create a data frame to store results
+  results <- data.frame(
+    patient_id = character(),
+    num_unique_tags = integer(),
+    stringsAsFactors = FALSE
+  )
+  
+  # Loop through each element in data_allo
+  for (i in seq_along(data_allo)) {
+    # Get all names at this level that end with "_MLRCFSElo_both"
+    mlrcfselo_names <- grep("MLRCFSElo", names(data_allo[[i]]), value = TRUE)
+    
+    for (mlrcfselo_name in mlrcfselo_names) {
+      # Extract patient ID from the name (assuming format like "R051_MLRCFSElo_both")
+      patient_id <- sub("^([^_]+)_.*$", "\\1", mlrcfselo_name)
+      
+      # Get the data
+      mlrcfselo_data <- data_allo[[i]][[mlrcfselo_name]]
+      
+      # Count unique tags based on data type
+      num_unique <- 0
+      if (is.data.frame(mlrcfselo_data) || is.matrix(mlrcfselo_data)) {
+        # For tibbles/data frames, look for tag columns
+        if ("tag" %in% colnames(mlrcfselo_data)) {
+          num_unique <- length(unique(mlrcfselo_data$tag))
+        } else {
+          # If no obvious tag column, count rows as a fallback
+          num_unique <- nrow(mlrcfselo_data)
+        }
+      } else if (is.vector(mlrcfselo_data)) {
+        # For vectors, count unique elements
+        num_unique <- length(unique(mlrcfselo_data))
+      }
+      
+      # Add to results
+      results <- rbind(results, data.frame(
+        patient_id = patient_id,
+        num_unique_tags = num_unique,
+        stringsAsFactors = FALSE
+      ))
+    }
+  }
+  
+  # Aggregate by patient_id (in case the same patient appears multiple times)
+  if (nrow(results) > 0) {
+    agg_results <- aggregate(num_unique_tags ~ patient_id, data = results, FUN = sum)
+    return(agg_results)
+  } else {
+    return(results)
+  }
+}
+
+# Run the function
+patient_tag_counts <- count_unique_tags_by_patient(data_allo)
+
+# Define the custom order with R prefix and 3-digit format
+custom_order <- c("R051", "R066", "R067", "R068", "R069", "R070", "R076", "R081", "R086", 
+                  "R090", "R093", "R101", "R143", "R137", "R150", "R153", "R091", 
+                  "R098", "R160", "R179", "R155","R154","R176","R181","R183")
+
+# Create a factor with the custom order
+patient_tag_counts$patient_id <- factor(patient_tag_counts$patient_id, 
+                                        levels = custom_order)
+
+# Sort the data frame by the factor
+ordered_counts <- patient_tag_counts[order(patient_tag_counts$patient_id), ]
+
+# Print results in requested order
+print(ordered_counts)
+
+# Create a bar plot of the results in the custom order
+if (requireNamespace("ggplot2", quietly = TRUE)) {
+  library(ggplot2)
+  ggplot(ordered_counts, aes(x = patient_id, y = num_unique_tags)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    labs(title = "Number of Unique Tags by Patient ID",
+         x = "Patient ID",
+         y = "Number of Unique Tags") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+```
+
+
+
+
+```{r}
+# Function to sum template values by patient ID
+sum_template_by_patient <- function(data_all) {
+  # Create a data frame to store results
+  results <- data.frame(
+    patient_id = character(),
+    sum_template = numeric(),
+    stringsAsFactors = FALSE
+  )
+  
+  # Loop through each element in data_allo
+  for (i in seq_along(data_allo)) {
+    # Get all names at this level that end with "_MLRCFSElo_both"
+    mlrcfselo_names <- grep("MLRCFSElo", names(data_allo[[i]]), value = TRUE)
+    
+    for (mlrcfselo_name in mlrcfselo_names) {
+      # Extract patient ID from the name (assuming format like "R051_MLRCFSElo_both")
+      patient_id <- sub("^([^_]+)_.*$", "\\1", mlrcfselo_name)
+      
+      # Get the data
+      mlrcfselo_data <- data_allo[[i]][[mlrcfselo_name]]
+      
+      # Sum template values based on data type
+      template_sum <- 0
+      if (is.data.frame(mlrcfselo_data) || is.matrix(mlrcfselo_data)) {
+        # For tibbles/data frames, look for template column
+        if ("templates" %in% colnames(mlrcfselo_data)) {
+          # Sum the template column, handling NA values
+          template_sum <- sum(mlrcfselo_data$templates, na.rm = TRUE)
+        }
+      } 
+      
+      # Add to results
+      results <- rbind(results, data.frame(
+        patient_id = patient_id,
+        sum_template = template_sum,
+        stringsAsFactors = FALSE
+      ))
+    }
+  }
+  
+  # Aggregate by patient_id (in case the same patient appears multiple times)
+  if (nrow(results) > 0) {
+    agg_results <- aggregate(sum_template ~ patient_id, data = results, FUN = sum)
+    return(agg_results)
+  } else {
+    return(results)
+  }
+}
+
+# Run the function
+patient_template_sums <- sum_template_by_patient(data_allo)
+
+# Define the custom order with R prefix and 3-digit format
+custom_order <- c("R051", "R066", "R067", "R068", "R069", "R070", "R076", "R081", "R086", 
+                  "R090", "R093", "R101", "R143", "R137", "R150", "R153", "R091", 
+                  "R098", "R160", "R179", "R155","R154","R176","R181","R183")
+
+# Create a factor with the custom order
+patient_template_sums$patient_id <- factor(patient_template_sums$patient_id, 
+                                        levels = custom_order)
+
+# Sort the data frame by the factor
+ordered_sums <- patient_template_sums[order(patient_template_sums$patient_id), ]
+
+# Print results in requested order
+print(ordered_sums)
+
+# Create a bar plot of the results in the custom order
+if (requireNamespace("ggplot2", quietly = TRUE)) {
+  library(ggplot2)
+  ggplot(ordered_sums, aes(x = patient_id, y = sum_template)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    labs(title = "Sum of Template Values by Patient ID",
+         x = "Patient ID",
+         y = "Sum of Template Values") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+```
+```{r}
+patient_template_totals <- data.frame()
+
+for(p in 1:length(data_all)) {
+  sum_templates <- 0
+  
+  for(i in 1:length(data_all[[p]])) {
+    if(is.data.frame(data_all[[p]][[i]])) {
+      if("templates" %in% colnames(data_all[[p]][[i]])) {
+        sum_templates <- sum_templates + sum(data_all[[p]][[i]]$templates, na.rm = TRUE)
+      }
+    }
+  }
+  
+  patient_template_totals <- rbind(patient_template_totals, 
+                                   data.frame(PatientID = data_meta[[p]][1,1], 
+                                            Total_Templates = sum_templates))
+}
+
+# Reorder by custom order
+custom_order <- c("R051", "R066", "R067", "R068", "R069", "R070", "R076", "R081", "R086", 
+                  "R090", "R093", "R101", "R143", "R137", "R150", "R153", "R091", 
+                  "R098", "R160", "R179", "R155","R154","R176","R181","R183")
+
+patient_template_totals$PatientID <- factor(patient_template_totals$PatientID, 
+                                             levels = custom_order)
+
+patient_template_totals <- patient_template_totals[order(patient_template_totals$PatientID), ]
+
+print(patient_template_totals)
+
+
+```
+```{r}
+# Count UNIQUE clones per patient (across all timepoints)
+
+patient_unique_clones <- data.frame()
+
+for(p in 1:length(data_all)) {
+  all_clones_combined <- data.frame()
+  
+  # Combine all timepoints for this patient
+  for(i in 1:length(data_all[[p]])) {
+    if(is.data.frame(data_all[[p]][[i]])) {
+      all_clones_combined <- bind_rows(all_clones_combined, data_all[[p]][[i]])
+    }
+  }
+  
+  # Count UNIQUE clones (remove duplicates across timepoints)
+  unique_clone_count <- all_clones_combined %>%
+    distinct(cdr3_amino_acid, v_resolved, j_resolved) %>%
+    nrow()
+  
+  patient_id <- data_meta[[p]][1, 1]
+  
+  patient_unique_clones <- rbind(patient_unique_clones, 
+                                data.frame(PatientID = patient_id, 
+                                         Unique_Clones = unique_clone_count))
+}
+
+# Reorder by custom order
+custom_order <- c("R051", "R066", "R067", "R068", "R069", "R070", "R076", "R081", "R086", 
+                  "R090", "R093", "R101", "R143", "R137", "R150", "R153", "R091", 
+                  "R098", "R160", "R179", "R155","R154","R176","R181","R183")
+
+patient_unique_clones$PatientID <- factor(patient_unique_clones$PatientID, 
+                                          levels = custom_order)
+
+patient_unique_clones <- patient_unique_clones[order(patient_unique_clones$PatientID), ]
+
+print(patient_unique_clones)
+
+write.csv(patient_unique_clones, 
+          "/Users/lingtingshi/Documents/GVHD_project/From_Michael/MLR_Pipeline/Main_fig/PatientUniqueClones.csv",
+          row.names = FALSE)
+```
+
+
+```{r}
+
+# add cdr3vj 
+data_allo <- map(data_allo, function(list1) {
+  map(list1, ~ mutate(.x, tag = paste(cdr3_amino_acid, v_resolved, j_resolved, sep = " ")))
+})
+
+data_allo_w0 <- map(data_allo_w0, function(list1) {
+  map(list1, ~ mutate(.x, tag = paste(cdr3_amino_acid, v_resolved, j_resolved, sep = " ")))
+})
+
+expanded_clones <- map(expanded_clones, ~ mutate(.x, tag = paste(cdr3_amino_acid, v_resolved, j_resolved, sep = " ")))
+```
+
+```{r}
+# map data_allo with expanded_clones
+for (i in 1:length(data_allo)) {
+  for (j in 1:length(data_allo[[i]])) {
+    data_allo[[i]][[j]] <- data_allo[[i]][[j]] %>%
+      mutate(ifexpanded = ifelse(tag %in% expanded_clones[[i]]$tag, TRUE, FALSE))
+  }
+}
+
+for (i in 1:length(data_allo_w0)) {
+  for (j in 1:length(data_allo_w0[[i]])) {
+    data_allo_w0[[i]][[j]] <- data_allo_w0[[i]][[j]] %>%
+      mutate(ifexpanded = ifelse(tag %in% expanded_clones[[i]]$tag, TRUE, FALSE))
+  }
+}
+```
+
+
+```{r}
+cd48_allo <- vector("list", length(filenames))
+
+for (file_num in seq_along(filenames)) {
+  cd48_allo[[file_num]] <- vector("list", length(data_allo_w0[[file_num]]))
+  
+  for (i in seq_along(data_allo_w0[[file_num]])) {
+    cd48_allo[[file_num]][[i]] <- data_allo_w0[[file_num]][[i]] %>%
+      mutate(ifexpanded = as.character(ifexpanded))
+  }
+}
+
+data_CD48_all <- bind_rows(do.call("c", cd48_allo))
+data_CD48_all <- dplyr::full_join(data_CD48_all, meta_data, by = 'PatientID')
+data_CD48_all_expand <- data_CD48_all[data_CD48_all$ifexpanded==TRUE,]
+data_CD48_all_expand <- data_CD48_all_expand[!is.na(data_CD48_all_expand$cdr3_amino_acid),]
+
+data_CD48_all <- data_CD48_all
+
+data_CD48_all_expand <- data_CD48_all_expand
+
+# ptcy_here
+```
+
+```{r}
+clinical_data <- read_excel("/Users/lingtingshi/Documents/TCR_Project.xlsx", sheet = "Patient Metadata cont.")
+clinical_data <- clinical_data[c('PatientID', 'Age_R', 'HLA_mis', 'DLI_PTD', 'Relapse', 'Off Immunosuppresion', 'GVHD_DX_Post_Transplant', 'GVHD Max Grade Post Transplant', 'EBV +', 'HHV6 +', 'Systemic_Steroids', 'CMV +', "Chronic")]
+
+clinical_data$PatientID <- as.character(clinical_data$PatientID)
+# clinical_data$PatientID <- paste("R", sprintf("%03d", as.integer(clinical_data$PatientID)), sep = "")
+meta_data_clin <- dplyr::full_join(meta_data, clinical_data, by = "PatientID")%>%
+  filter(!is.na(DonorType))
+# ptcy_here
+```
+
+```{r}
+data_allo_squished <- lapply(data_allo, function(x){
+    bind_rows(x)
+})
+data_allo_squished <- bind_rows(data_allo_squished)
+data_allo_squished$allo <- TRUE
+
+data_nonallo_squished <- lapply(data_nonallo, function(x){
+    bind_rows(x)
+})
+data_nonallo_squished <- bind_rows(data_nonallo_squished)
+data_nonallo_squished$allo <- FALSE
+data_nonallo_squished$ifexpanded <- FALSE
+
+data_squished <- bind_rows(data_allo_squished, data_nonallo_squished)
+data_squished_meta <- dplyr::inner_join(data_squished, meta_data_clin, by = "PatientID")
+
+
+# write.csv(data_squished_meta, file = "/Users/pressm/Documents/AziziLab/GVHD/immunoseq_r/AllClones.csv")
+
+```
+
+```{r}
+data_allo_squished_w0 <- lapply(data_allo_w0, function(x){
+    bind_rows(x)
+})
+data_allo_squished_w0 <- bind_rows(data_allo_squished_w0)
+data_allo_squished_w0$type <- "allo"
+
+data_nonallo_squished_w0 <- lapply(data_nonallo_w0, function(x){
+    bind_rows(x)
+})
+data_nonallo_squished_w0 <- bind_rows(data_nonallo_squished_w0)
+data_nonallo_squished_w0$type <- "nonallo"
+data_nonallo_squished_w0$ifexpanded <- FALSE
+
+data_squished_w0 <- bind_rows(data_allo_squished_w0, data_nonallo_squished_w0)
+data_squished_meta_w0 <- dplyr::inner_join(data_squished_w0, meta_data_clin, by = "PatientID")
+
+length(data_squished_meta_w0$cdr3_amino_acid)
+
+# mapped_cells_all <- read_csv("/Users/pressm/Documents/AziziLab/GVHD/immunoseq_r/tcr_sel_all_mapped.csv",)
+# mapped_cells_all <- mapped_cells_all%>%
+#   mutate(cdr3_amino_acid = cdr3, PatientID = ifelse(nchar(gsub("C","",PatientID)) == 3, gsub("C","R",PatientID), gsub("C","R0",PatientID)), mapped = TRUE,
+#          v_resolved = paste0("TRBV",V1, "-", V2), j_resolved = paste0("TRBJ", J1, "-", J2))
+# mapped_cells <- mapped_cells_all%>%
+#   select(PatientID, cdr3_amino_acid, v_resolved, j_resolved, mapped, Tissue_Location, Migration_all, leiden_0.5)
+# 
+# mapped_cells <- mapped_cells[!duplicated(mapped_cells, by = c("PatientID","cdr3_amino_acid", "v_resolved", "j_resolved")),]
+# data_squished_meta_w0 <- data_squished_meta_w0%>%
+#   left_join(mapped_cells, by = c("PatientID","cdr3_amino_acid", "v_resolved", "j_resolved"), multiple = "any")%>%
+#   replace_na(list(mapped = FALSE))%>%
+#   dplyr::mutate(tag = paste(cdr3_amino_acid, v_resolved, j_resolved), mapped = ifelse(mapped, "Mapped", "Not Mapped"))%>%
+#   dplyr::mutate(type = paste(type, mapped))
+
+
+
+# write.csv(data_squished_meta_w0, file = "/Users/pressm/Documents/AziziLab/GVHD/immunoseq_r/AllClones.csv")
+
+```
+
+```{r}
+all_allo_squished <- bind_rows(data_allo_squished_w0)%>%
+  mutate(tag = paste(cdr3_amino_acid, v_resolved, j_resolved), type = "Allo")%>%
+  select(PatientID, tag, type)%>%
+  distinct()
+all_nonallo_squished <- bind_rows(data_nonallo_squished_w0)%>%
+  mutate(tag = paste(cdr3_amino_acid, v_resolved, j_resolved), type = "Non-Allo")%>%
+  select(PatientID, tag, type)%>%
+  distinct()
+
+expanded_clones_squished <- bind_rows(expanded_clones)
+data_all_squished <- bind_rows(lapply(data, bind_rows))%>%
+  mutate(tag = paste(cdr3_amino_acid, v_resolved, j_resolved))
+
+data_all_squished_res <- data.frame()
+for(patient in unique(data_squished_w0$PatientID)){
+nonallo_pat <- all_nonallo_squished[all_nonallo_squished$PatientID == patient,]
+allo_pat <- all_allo_squished[all_allo_squished$PatientID == patient,]
+temp_squished<- data_squished_w0[data_squished_w0$PatientID == patient,]%>%
+  mutate(ifexpanded = ifelse(tag %in% expanded_clones_squished[expanded_clones_squished$PatientID == patient,]$tag, TRUE, FALSE))%>%
+  left_join(allo_pat, by = c("PatientID","tag"), relationship = "many-to-one")%>%
+  left_join(nonallo_pat, by = c("PatientID","tag"), relationship = "many-to-one")%>%
+  mutate(type = ifelse(is.na(type.x), ifelse(is.na(type.y), "Other", type.y), type.x))%>%
+  select(-c("type.y", "type.x"))
+
+data_all_squished_res <- bind_rows(data_all_squished_res,temp_squished)
+}
+
+data_all_squished <- data_all_squished_res
+data_all_squished_w0_meta <- dplyr::left_join(data_all_squished_res, meta_data_clin, by = "PatientID", multiple = "all", relationship = "many-to-one")
+
+
+# ptcy_here
+# write.csv(data_all_squished_w0_meta, file ="/Users/pressm/Documents/AziziLab/GVHD/immunoseq_r/AllClones_all.csv")
+
+```
+
+
+
+
+
+
+```{r}
+
+  str_list = c("unstimulated","MLRCFSElo")
+  for (idx in sort(na.omit(data.frame(strtoi(unique(data_all_squished_w0_meta$timepoint))))[,1]))
+  {
+    str_list <-append(str_list, toString(idx))
+  }
+
+avg_timepoints <- data_all_squished_w0_meta %>%
+  group_by(PatientID,timepoint)%>%
+  summarise(freq = sum(frequency))%>%
+  filter(timepoint %in% str_list)%>%
+  ungroup()%>%
+  group_by(PatientID)%>%
+  summarise(ntp = n())
+
+min_ntp <- min(avg_timepoints$ntp)
+max_ntp <- max(avg_timepoints$ntp)
+avg_ntp <- mean(avg_timepoints$ntp)
+
+print(paste("Min # tp = ", min_ntp, ", Max # tp = ", max_ntp, ", Average # tp = ", avg_ntp))
+```
+
+
+Matched unrelated donors have a higher proportion than Matched related and sibling donor.
+
+```{r}
+#Descriptive data table
+descriptive_data <- data.frame()
+All_unique_clones <- data.frame()
+All_allo_unique_clones <- data.frame()
+All_nonall_prop <- data.frame()
+All_allo_prop <- data.frame()
+for(i in seq(1, length(data),1)){
+  immdata <- data[[i]]
+  immdata_alloreactive <- data_allo[[i]]
+  sample_meta_data <- data_meta[[i]]
+  
+  all_clones <- bind_rows(immdata, .id = 'SampleID')%>%
+    group_by(SampleID)%>%
+    dplyr::summarise(unique_clones = n())%>%
+    mutate(SampleID = unlist(sample_meta_data[2,]))
+  
+  immdata_alloreactive <- lapply(immdata_alloreactive, function(x){
+    if(length(x$timepoint) == 0){
+      x <- rbind(x,data.frame(matrix(NA, ncol = ncol(x))))
+    }else{
+      x <- x
+    }
+  })
+  
+  allo_clones <- bind_rows(immdata_alloreactive, .id = 'SampleID')%>%
+    group_by(SampleID)%>%
+    dplyr::summarise(unique_allo_clones = n())%>%
+    mutate(SampleID = unlist(sample_meta_data[2,]))
+  
+  clones <- dplyr::full_join(all_clones, allo_clones, by = 'SampleID')%>%
+    mutate(allo_prop = unique_allo_clones/unique_clones, nonallo_prop = (unique_clones - unique_allo_clones)/unique_clones)
+  
+  clones$unique_allo_clones <- as.character(clones$unique_allo_clones)
+  clones$unique_clones <- as.character(clones$unique_clones)
+  clones$allo_prop <- as.character(clones$allo_prop)
+  clones$nonallo_prop <- as.character(clones$nonallo_prop)
+
+  clones <- clones %>%
+    mutate(desc_data = paste(unique_clones, unique_allo_clones, allo_prop, nonallo_prop, sep = ", "), PatientID = sample_meta_data[1,1])
+
+clones_wide <- pivot_wider(clones, id_cols = PatientID, names_from = SampleID, values_from = desc_data)
+all_clones_wide <- pivot_wider(clones, id_cols = PatientID, names_from = SampleID, values_from = unique_clones)
+allo_clones_wide <- pivot_wider(clones, id_cols = PatientID, names_from = SampleID, values_from = unique_allo_clones)
+allo_prop_wide <- pivot_wider(clones, id_cols = PatientID, names_from = SampleID, values_from = allo_prop)
+nonallo_prop_wide <- pivot_wider(clones, id_cols = PatientID, names_from = SampleID, values_from = nonallo_prop)
+
+descriptive_data <- bind_rows(descriptive_data, clones_wide)
+All_unique_clones <- bind_rows(All_unique_clones, all_clones_wide)
+All_allo_unique_clones <- bind_rows(All_allo_unique_clones, allo_clones_wide)
+All_allo_prop <- bind_rows(All_allo_prop, allo_prop_wide)
+All_nonall_prop <- bind_rows(All_nonall_prop, nonallo_prop_wide)
+
+}
+ descriptive_data <- descriptive_data%>%
+   select('PatientID',c(sort(colnames(descriptive_data)[!grepl("^\\d+$|MLR|unstim",colnames(descriptive_data))])), 'unstimulated', 'MLRCFSElo',
+ c(as.character(sort(as.numeric(colnames(descriptive_data)[grepl("^\\d+$",colnames(descriptive_data))])))))
+ 
+ #write.csv(descriptive_data,"/Users/pressm/Documents/AziziLab/GVHD/immunoseq_r/Descriptive_Data.csv")
+
+```
+
+
+
+```{r}
+cum_freq <- function(allo_data, data){ 
+  freqs <-as.data.frame(do.call(rbind, Map(function(x, y) {
+    sum(x$frequency) / sum(y$frequency)
+  }, x = allo_data, y = data)))
+  return(freqs)
+}
+```
+
+```{r}
+avg_freq <- function(allo_data, data){ 
+  freqs <-as.data.frame(do.call(rbind, Map(function(x, y) {
+    mean(x$frequency) / sum(y$frequency)
+  }, x = allo_data, y = data)))
+  return(freqs)
+}
+```
+
+```{r}
+
+clone_frac <- function(allo_data, data){
+  as.data.frame(do.call(rbind, Map(function(x, y) {
+    nrow(x) / nrow(y)
+  }, x = allo_data, y = data)))
+}
+
+```
+
+
+```{r}
+
+n_clone <- function(allo_data, data){
+  n_clones <- as.data.frame(do.call(rbind, Map(function(x, y) {
+    nrow(x)
+  }, x = allo_data, y = data)))
+}
+
+```
+
+```{r}
+# =============================================================================
+# GLOBAL PATIENT SHAPE MAPPING
+# Create a single, consistent shape mapping for PTCy patients across ALL figures
+# This ensures each PTCy patient has the same shape throughout the entire analysis
+# =============================================================================
+
+# Get only PTCy patients from metadata
+ptcy_patients <- meta_data %>%
+  filter(PTCy == "PTCy") %>%
+  pull(PatientID) %>%
+  unique() %>%
+  sort()
+
+# Assign shapes 0-24 (cycling if >25 patients)
+if (length(ptcy_patients) > 25) {
+  warning(paste("More than 25 PTCy patients detected (", length(ptcy_patients), 
+                ") - shapes will recycle. Consider a different encoding."))
+}
+
+GLOBAL_PATIENT_SHAPES <- setNames(
+  (seq_along(ptcy_patients) - 1) %% 25,
+  ptcy_patients
+)
+```
+
+## Diversity Figure Function
+
+```{r func_div_fig}
+
+div_fig <- function(patient_data, div, Patient){
+  #selected <- subset(patient_data, patient_data$Rep_div %in% types)
+  fig <- ggplot(patient_data, aes(SampleID,.data[[div]], group = Rep_div, color=Rep_div, shape = PatientID)) +
+    geom_point(size = 3) +
+    geom_line() +
+    scale_y_continuous(trans='log10', labels = scales::number_format(accuracy = 0.01))+
+    scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+    labs(y = div, x = "Days Post Transplantation", title = Patient) +
+    theme_minimal()+
+    theme(axis.text.x = element_text(angle = 45, vjust = 0.5, size = 8))
+  return(fig)
+}
+
+clone_fig <- function(immdata, type, title){
+  fig <- ggplot(immdata, aes(timepoint, frequency, color = .data[[type]], group = tag)) +
+    geom_point(size = 1) + 
+    geom_line() +
+    labs(title = title)+
+    scale_y_continuous(trans = "log10", labels = scales::number_format(accuracy = 0.01)) +
+    theme_minimal(base_size = 18)+
+    theme(axis.text.x = element_text(angle = 45, vjust = 0.5, size = 8))
+  return(fig)
+}
+
+
+add_tag <- function(immdata){
+  immdata$tag <- paste(immdata$cdr3_amino_acid , immdata$v_resolved , immdata$j_resolved)
+  return(immdata)
+}
+
+convert_id <- function(immdata){
+  ids <- strsplit(immdata$id, "_")
+  immdata$timepoints <- sapply(ids, function(x) x[[2]])
+  immdata$PatientID <- sapply(ids, function(x) x[[1]])
+  return(immdata)
+}
+
+```
+
+```{r}
+str_list = c("unstimulated","MLRCFSElo")
+for (i in sort(na.omit(data.frame(strtoi(unique(data_CD48_all$timepoint))))[,1]))
+{
+  str_list <-append(str_list, toString(i))
+}
+
+
+data_CD48_all$timepoint <- factor(data_CD48_all$timepoint, level = str_list)
+data_CD48_all <- data_CD48_all[!is.na(data_CD48_all$timepoint),]
+
+
+```
+
+
+```{r, fig.height = 10, fig.width=16}
+data_allo_input <- data_allo
+all_allo_div_input <- all_allo_div
+full_allo_input <- all_full_allo
+patient_data_all = data.frame()
+all_amino = data.frame()
+allo_amino = data.frame()
+
+for(i in seq(1,length(data),1)){
+  immdata2 <- data[[i]]
+  immdata_alloreactives <- data_allo[[i]]
+  immdata_nonalloreactives <- data_nonallo[[i]]
+  allo <- data_allo_input[[i]]
+  sample_meta_data <- data_meta[[i]]
+  all_rep <- all_rep_div[[i]]
+  allo_rep <- all_allo_div_input[[i]]
+  nonallo_rep <- all_nonallo_div[[i]]
+  full_allo <- full_allo_input[[i]]
+  curr_file <- filenames[i]
+  
+  
+  #add meta data
+  all_rep$PatientID <- t(data.frame(strsplit(all_rep$ID, split = "_")))[,1]
+  all_rep$SampleID <- t(data.frame(strsplit(all_rep$ID, split = "_")))[,2]
+  all_rep$Rep_div <-"all"
+  allo_rep$PatientID <- t(data.frame(strsplit(allo_rep$ID, split = "_")))[,1]
+  allo_rep$SampleID <- t(data.frame(strsplit(allo_rep$ID, split = "_")))[,2]
+  allo_rep$Rep_div <-"allo"
+  nonallo_rep$PatientID <- t(data.frame(strsplit(nonallo_rep$ID, split = "_")))[,1]
+  nonallo_rep$SampleID <- t(data.frame(strsplit(nonallo_rep$ID, split = "_")))[,2]
+  nonallo_rep$Rep_div <-"nonallo"
+  # Plotting cumulative frequency of all allo-reactive
+  cum_freq_allo <- cum_freq(immdata_alloreactives, immdata2)
+  avg_freq_allo <- avg_freq(immdata_alloreactives, immdata2)
+  
+  # Plotting clone fraction of all allo-reactive
+  clone_fraction_allo <- clone_frac(immdata_alloreactives, immdata2)
+  
+    # Plotting clone fraction of all allo-reactive
+  n_clone_allo <- n_clone(immdata_alloreactives, immdata2)
+  
+  #Cumulative frequencies of all non-alloreactives
+  cum_freq_nonallo <- cum_freq(immdata_nonalloreactives, immdata2)
+  
+  avg_freq_nonallo <- avg_freq(immdata_nonalloreactives, immdata2)
+
+
+  #Clone fraction of all non-alloreactives
+  clone_fraction_nonallo <- clone_frac(immdata_nonalloreactives, immdata2)
+  
+  n_clone_nonallo <- n_clone(immdata_nonalloreactives, immdata2)
+  
+  #Cumulative frequences of all
+  cum_freq_all <- cum_freq(immdata2, immdata2)
+  avg_freq_all <- avg_freq(immdata2, immdata2)
+  
+  #Clone fraction of all 
+  clone_fraction_all <- clone_frac(immdata2, immdata2)
+  
+  n_clone_all <- n_clone(immdata2, immdata2)
+
+  
+  allo_rep$clone_fraction <-clone_fraction_allo$V1
+  allo_rep$cum_freq <-cum_freq_allo$V1
+  allo_rep$avg_freq <-avg_freq_allo$V1
+  allo_rep$n_clone <- n_clone_allo$V1
+  nonallo_rep$clone_fraction <-clone_fraction_nonallo$V1
+  nonallo_rep$cum_freq <-cum_freq_nonallo$V1
+  nonallo_rep$avg_freq <-avg_freq_nonallo$V1
+  nonallo_rep$n_clone <- n_clone_nonallo$V1
+  all_rep$clone_fraction <-clone_fraction_all$V1
+  all_rep$cum_freq <-cum_freq_all$V1
+  all_rep$avg_freq <-avg_freq_all$V1
+  all_rep$n_clone <- n_clone_allo$V1
+  data_patient <- rbind(allo_rep, nonallo_rep, all_rep)
+  allo_cd48 = full_allo
+  sorted_CD48_allo <- allo_cd48[order(-allo_cd48$frequency.CFSELo),] 
+  sorted_CD48_allo
+  sorted_CD48_allo$index = as.numeric(rownames(sorted_CD48_allo))
+  
+  
+  sample_list <-unique(data.frame(t(sample_meta_data))[,2])
+  
+  str_list = c("unstimulated","MLRCFSElo")
+  for (j in sort(na.omit(data.frame(strtoi(sample_list)))[,1]))
+  {
+    str_list <-append(str_list, toString(j))
+  }
+  top_allo_48 <- allo_cd48
+  
+  
+  
+  fig_data <- bind_rows(immdata_alloreactives, .id = "id")
+  fig_data <- add_tag(fig_data)
+  fig_data <- convert_id(fig_data)
+  fig_data$timepoints <- factor(fig_data$timepoints, levels=str_list)
+
+  
+  
+  # plot figures
+  allo_clone_fig <- ggplot(fig_data, aes(timepoints, frequency, group = tag, color = cell_type)) + #[fig_data$cell_type == "CD4",]
+    geom_point(size = 1) + 
+    geom_line() +
+    scale_y_continuous(trans = "log10")+
+    labs(x = curr_file, y = "Allo_Frequency") +
+    theme_minimal()
+
+  
+  selected_data <- data_patient[which(data_patient['Rep_div'] =="allo"),]
+  selected_data<- selected_data[selected_data$SampleID %in% str_list,]
+  selected_data$SampleID <- factor(selected_data$SampleID, levels=str_list)
+  selected_data_notnonallo <- data_patient#[which(data_patient['Rep_div'] !="all"),]
+  selected_data_notnonallo<- selected_data_notnonallo[selected_data_notnonallo$SampleID %in% str_list,]
+  selected_data_notnonallo$SampleID <- factor(selected_data_notnonallo$SampleID, levels=str_list)
+  
+  
+    
+  div_fig_1 <- div_fig(selected_data_notnonallo, 'clone_fraction', filenames[i])
+  div_fig_2 <- div_fig(selected_data_notnonallo, 'gini.simpson', filenames[i])
+  div_fig_3 <- div_fig(selected_data_notnonallo, 'shannons.entropy', filenames[i])
+  div_fig_4 <- div_fig(selected_data_notnonallo, 'cum_freq', filenames[i])
+  
+  fig_data_top <- dplyr::inner_join(fig_data, data.frame(tag = data_CD48_all_expand$tag), by = c('tag'))
+  
+  fig_data$timepoints <- factor(fig_data$timepoints, levels=str_list)
+
+
+  # plot figures
+  top_clone_fig = ggplot(fig_data_top, aes(timepoints, frequency, group = tag, color = cell_type)) + #[fig_data_top$cell_type == "CD4",] 
+    geom_point(size = 1) +
+    geom_line() +
+    scale_y_continuous(trans = "log10", ) +
+    labs(x = curr_file, y = "Top_allo_Frequency") +
+    theme_minimal()
+
+
+  main_fig <-(grid.arrange(allo_clone_fig,top_clone_fig,div_fig_1,div_fig_2,div_fig_3,div_fig_4))#, length_over_time_plot,boxen_plot, boxen_plot_alp, ncol = 1))
+  ggsave(paste0('/Users/lingtingshi/Documents/GVHD_project/From_Michael/MLR_Pipeline/Main_fig/MainFig_',curr_file,'.png'), plot = main_fig, width = 16, height = 10, dpi = 600)
+  
+  patient_data_all<- rbind(patient_data_all, data_patient)
+}
+
+### ptcy_here
+```
+
+# PTCy GVHD Analysis
+
+## Analysis Configuration
+
+Colors and shapes are configured for consistent visualization:
+
+- **GVHD Grades**: No (teal), Mild (blue), Severe (orange)
+- **Patient Shapes**: Unique shape per PTCy patient (0-24, cycling if >25)
+
+## Timepoint Selection Functions
+
+```{r,fig.height = 8, fig.width=16, dpi = 600}
+
+get_timepoint <- function(df) {
+  #' Get earliest post-stimulation timepoints for each patient
+  #'
+  #' @description Selects all timepoints <= 3 and the earliest timepoint > 3
+  #' for each patient.
+  #'
+  #' @param df A dataframe containing `timepoint` and `PatientID` columns.
+  #' @return A dataframe with the earliest timepoints for each patient.
+
+  df <- df %>%
+    mutate(timepoint = strtoi(timepoint)) %>%
+    filter(!is.na(timepoint))
+
+  # Select all timepoints <= 3
+  df_res <- df %>%
+    filter(timepoint <= 3)
+
+  # For each patient, select the earliest timepoint > 3
+  df_patients <- df %>%
+    group_by(PatientID) %>%
+    filter(timepoint > 3) %>%
+    filter(timepoint == min(timepoint)) %>%
+    ungroup()
+
+  df_res <- bind_rows(df_res, df_patients)
+  return(df_res)
+}
+
+get_early_timepoint <- function(df) {
+  #' Get earliest and specific early timepoints for each patient
+  #'
+  #' @description Selects the earliest timepoint > 3 and timepoints between
+  #' 2 and 3 for each patient.
+  #'
+  #' @param df A dataframe containing `timepoint` and `PatientID` columns.
+  #' @return A dataframe with earliest and early timepoints per patient.
+
+  df_res <- data.frame()
+
+  for (patient in unique(df$PatientID)) {
+    # Earliest timepoint > 3
+    df_pat <- df %>%
+      filter(PatientID == patient, timepoint > 3) %>%
+      filter(timepoint == min(timepoint))
+
+    # Timepoints between 2 and 3
+    df_pat_3 <- df %>%
+      filter(PatientID == patient, timepoint >= 2, timepoint <= 3)
+
+    df_res <- bind_rows(df_res, df_pat, df_pat_3)
+  }
+
+  return(df_res)
+}
+
+# -----------------------------------------------------------------------------
+# Color & Shape Settings
+# -----------------------------------------------------------------------------
+
+# GVHD Grade colors: No = grey, Mild = blue, Severe = red (no green)
+gvhd_colors <- c(
+  "No"     = "#09BB8C",
+  "Mild"   = "#005A8F",
+  "Severe" = "#B85000"
+)
+
+# PTCy fill colors (boxplots)
+ptcy_fills <- c("PTCy" = "#E6BE60", "No PTCy" = "#A483AF")
+
+# Axis label mapping (display only; does not alter data values)
+timepoint_axis_labels <- c(
+  "unstimulated"       = "Donor",
+  "<= 3"               = "Day 3",
+  "2/3"                = "Day 3",
+  "Earliest Timepoint" = "Engraftment",
+  "Donor"              = "Donor"
+)
+
+# R has 25 built-in shapes (0-25). We'll assign them dynamically per dataset
+# so all patients get a unique shape. If you have >25 patients, shapes recycle
+# with a warning — let me know and we can handle that separately.
+
+# -----------------------------------------------------------------------------
+# Pre-allocate plot lists
+# -----------------------------------------------------------------------------
+
+unstim_plot_freqs      <- vector("list", 3)
+unstim_3_plot_freqs    <- vector("list", 3)
+early_plot_freqs       <- vector("list", 3)
+earliest_plot_freqs    <- vector("list", 3)
+unstim_plot_shannons   <- vector("list", 3)
+unstim_3_plot_shannons <- vector("list", 3)
+early_plot_shannons    <- vector("list", 3)
+earliest_plot_shannons <- vector("list", 3)
+early_plot_n_clones    <- vector("list", 3)
+early_plot_avg_freqs   <- vector("list", 3)
+```
+## Main Analysis by Repertoire Type
+
+The following analysis iterates through alloreactive, non-alloreactive, and all clones.
+
+```{r main_analysis_loop}
+# Main Loop
+
+for (rep_div in c("allo", "nonallo", "all")) {
+
+  if (rep_div == "allo") {
+    i          <- 1
+    rep_title  <- "Alloreactive"
+  } else if (rep_div == "nonallo") {
+    i          <- 2
+    rep_title  <- "Non-Alloreactive"
+  } else {
+    i          <- 3
+    rep_title  <- "All"
+  }
+
+  # --------------------------------------------------------------------------
+  # Data Preparation
+  # --------------------------------------------------------------------------
+
+  patient_data_allo <- dplyr::full_join(patient_data_all, meta_data, by = "PatientID") %>%
+    mutate(timepoint = SampleID) %>%
+    select(-c(SampleID))
+
+  colnames(patient_data_allo) <- sapply(
+    colnames(patient_data_allo),
+    function(x) { str_replace_all(x, "-", "") }
+  )
+
+  patient_data_allo <- patient_data_allo[patient_data_allo$Rep_div == rep_div, ]
+  patient_data_allo <- patient_data_allo[which(!is.na(patient_data_allo$timepoint)), ]
+
+  patient_data_allo[patient_data_allo$timepoint == "MLRCFSElo", ]$timepoint <- "1"
+  patient_data_allo[patient_data_allo$timepoint == "unstimulated", ]$timepoint <- "0"
+
+  patient_data_allo_copy <- patient_data_allo %>%
+    mutate(timepoint = strtoi(timepoint))
+  patient_data_allo_copy <- patient_data_allo_copy[which(!is.na(patient_data_allo_copy$timepoint)), ]
+
+  patient_data_allo_copy <- patient_data_allo_copy %>%
+    mutate(GVHD_GRADE_1 = ifelse(grepl("Severe", GVHD_GRADE_1), "Severe", GVHD_GRADE_1)) %>%
+    mutate(GVHD_GRADE_1 = factor(GVHD_GRADE_1, levels = c("No", "Mild", "Severe"))) %>%
+    replace_na(list(shannons.diversity = 0, shannons.entropy = 0))
+
+  # Unstimulated (timepoint == 0)
+  df_unstimulated <- patient_data_allo_copy[patient_data_allo_copy$timepoint == 0, ] %>%
+    mutate(timepoint = "Donor") %>%
+    filter(PTCy == "PTCy")
+
+  df_unstimulated_all <- patient_data_allo_copy[patient_data_allo_copy$timepoint == 0, ] %>%
+    mutate(timepoint = "Donor")
+
+  # Filter to post-stimulation timepoints
+  patient_data_allo_copy <- patient_data_allo_copy[patient_data_allo_copy$timepoint > 1, ]
+
+  # Early timepoints
+  df_early_timepoint_all <- get_early_timepoint(patient_data_allo_copy) %>%
+    mutate(timepoint = ifelse(timepoint <= 3, "<= 3", "Earliest Timepoint")) %>%
+    mutate(timepoint = factor(timepoint, levels = c("<= 3", "Earliest Timepoint"))) %>%
+    group_by(PatientID, GVHD_GRADE_1, timepoint)
+
+  df_early_timepoint <- df_early_timepoint_all %>%
+    filter(PTCy == "PTCy")
+  df_early_timepoint <- df_early_timepoint[df_early_timepoint$PatientID != "R070", ]
+
+  # Clinical data join
+  data_CD48_all_expand_adj <- dplyr::full_join(data_CD48_all_expand, clinical_data, by = "PatientID")
+  data_CD48_all_expand_adj <- data_CD48_all_expand_adj[!is.na(data_CD48_all_expand_adj$cdr3_amino_acid), ]
+  data_CD48_all_expand_adj <- data_CD48_all_expand_adj[data_CD48_all_expand_adj$PatientID != "R070", ]
+
+  df_timepoint <- get_timepoint(patient_data_allo_copy) %>%
+    mutate(timepoint = ifelse(timepoint <= 3 & timepoint >= 2, "<= 3", "Earliest Timepoint")) %>%
+    mutate(timepoint = factor(timepoint, levels = c("Donor", "<= 3", "Earliest Timepoint"))) %>%
+    filter(PTCy == "PTCy")
+  df_timepoint <- df_timepoint[df_timepoint$PatientID != 70, ]
+
+  df_unstimulated_3 <- bind_rows(
+    df_unstimulated %>% filter(PatientID %in% unique(df_timepoint$PatientID)),
+    df_early_timepoint
+  ) %>%
+    mutate(timepoint = factor(timepoint, levels = c("Donor", "<= 3", "Earliest Timepoint"))) %>%
+    group_by(PatientID) %>%
+    mutate(n_in = n()) %>%
+    filter(n_in >= 3) %>%
+    ungroup() %>%
+    replace_na(list(avg_freq = 0))
+
+  # --------------------------------------------------------------------------
+  # Use GLOBAL patient shape mapping (defined earlier)
+  # --------------------------------------------------------------------------
+  # All plots will now use GLOBAL_PATIENT_SHAPES for consistency
+
+  # --------------------------------------------------------------------------
+  # Plot 1: Unstimulated - Cumulative Frequency (PTCy vs No PTCy boxplot)
+  # --------------------------------------------------------------------------
+
+  unstim_plot_freq <- ggplot(
+    df_unstimulated_all,
+    aes(x = PTCy, y = cum_freq, fill = PTCy)
+  ) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_beeswarm(aes(color = GVHD_GRADE_1, shape = PatientID), size = 3) +
+    scale_color_manual(values = gvhd_colors, name = "GVHD Grade") +
+    scale_fill_manual(values = ptcy_fills, guide = "none") +
+    scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+    scale_y_continuous(labels = scales::number_format(accuracy = 0.0001)) +
+    stat_compare_means(
+      comparisons = list(c("PTCy", "No PTCy")),
+      method      = "wilcox.test",
+      label       = "p.format",
+      hide.ns     = FALSE,
+      label.y     = quantile(df_unstimulated_all$cum_freq, probs = 0.9),
+      size        = 5
+    ) +
+    labs(
+      x     = "PTCy Status",
+      y     = "Cumulative Frequency",
+      title = paste(rep_title, "Unstimulated")
+    ) +
+    theme_pubr() +
+    theme(legend.position = "right")
+
+  # --------------------------------------------------------------------------
+  # Plot 2: Unstimulated + Early Timepoints (Donor -> <= 3, paired lines)
+  # --------------------------------------------------------------------------
+
+  unstim_3_plot_freq <- ggplot(
+    df_unstimulated_3,
+    aes(x = timepoint, y = cum_freq, group = PatientID)
+  ) +
+    geom_line(aes(color = GVHD_GRADE_1), linewidth = 1.5) +
+    geom_point(aes(color = GVHD_GRADE_1, shape = PatientID), size = 5) +
+    scale_color_manual(values = gvhd_colors, name = "GVHD Grade") +
+    scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+    scale_y_continuous(labels = scales::number_format(accuracy = 0.0001)) +
+    stat_compare_means(
+      comparisons  = list(c("Donor", "<= 3")),
+      method       = "wilcox.test",
+      paired       = TRUE,
+      label        = "p.format",
+      hide.ns      = FALSE,
+      group.by     = "PatientID",
+      size         = 5,
+      label.y      = quantile(df_unstimulated_3$cum_freq, probs = 0.9)
+    ) +
+    labs(
+      x     = "Timepoint",
+      y     = "Cumulative Frequency",
+      title = paste(rep_title, "Donor vs Early")
+    ) +
+    theme_pubr() +
+    theme(legend.position = "right")
+
+  # --------------------------------------------------------------------------
+  # Plot 3: Earliest Timepoint - PTCy vs No PTCy (boxplot)
+  # --------------------------------------------------------------------------
+
+  earliest_plot_freq <- ggplot(
+    df_early_timepoint_all[df_early_timepoint_all$timepoint == "Earliest Timepoint", ],
+    aes(x = PTCy, y = cum_freq, fill = PTCy)
+  ) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_beeswarm(aes(color = GVHD_GRADE_1, shape = PatientID), size = 3) +
+    scale_color_manual(values = gvhd_colors, name = "GVHD Grade") +
+    scale_fill_manual(values = ptcy_fills, guide = "none") +
+    scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+    scale_y_continuous(labels = scales::number_format(accuracy = 0.0001)) +
+    stat_compare_means(
+      comparisons = list(c("PTCy", "No PTCy")),
+      method      = "wilcox.test",
+      label       = "p.format",
+      hide.ns     = FALSE,
+      label.y     = quantile(df_early_timepoint_all$cum_freq, probs = 0.9),
+      size        = 5
+    ) +
+    labs(
+      x     = "PTCy Status",
+      y     = "Cumulative Frequency",
+      title = paste(rep_title, "Earliest Timepoint")
+    ) +
+    theme_pubr() +
+    theme(legend.position = "right")
+
+  # --------------------------------------------------------------------------
+  # Wilcoxon test: <= 3 vs Earliest Timepoint (one-sided, greater)
+  # --------------------------------------------------------------------------
+
+  test_res <- wilcox.test(
+    cum_freq ~ timepoint,
+    data        = df_unstimulated_3[!grepl("Donor", df_unstimulated_3$timepoint), ],
+    paired      = TRUE,
+    alternative = "greater"
+  )
+  print(test_res)
+
+  # --------------------------------------------------------------------------
+  # Plot 4: Early - Cumulative Frequency (<= 3 -> Earliest Timepoint)
+  # --------------------------------------------------------------------------
+
+  early_plot_freq <- ggplot(
+    df_unstimulated_3[df_unstimulated_3$timepoint != "Donor", ],
+    aes(x = timepoint, y = cum_freq, group = PatientID)
+  ) +
+    geom_line(aes(color = GVHD_GRADE_1), linewidth = 1.5) +
+    geom_point(aes(color = GVHD_GRADE_1, shape = PatientID), size = 5) +
+    scale_color_manual(values = gvhd_colors, name = "GVHD Grade") +
+    scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+    scale_y_continuous(labels = scales::number_format(accuracy = 0.0001)) +
+    stat_compare_means(
+      comparisons  = list(c("<= 3", "Earliest Timepoint")),
+      method       = "wilcox.test",
+      paired       = TRUE,
+      label        = "p.format",
+      hide.ns      = FALSE,
+      group.by     = "PatientID",
+      method.args  = list(alternative = "greater"),
+      size         = 5,
+      label.y      = quantile(df_unstimulated_3$cum_freq, probs = 0.9)
+    ) +
+    labs(
+      x     = "Timepoint",
+      y     = "Cumulative Frequency",
+      title = rep_title
+    ) +
+    theme_pubr() +
+    theme(legend.position = "right")
+
+  # --------------------------------------------------------------------------
+  # Plot 5: Unstimulated - Shannon's Diversity (PTCy vs No PTCy boxplot)
+  # --------------------------------------------------------------------------
+
+  unstim_plot_shannon <- ggplot(
+    df_unstimulated_all,
+    aes(x = PTCy, y = shannons.diversity, fill = PTCy)
+  ) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_beeswarm(aes(color = GVHD_GRADE_1, shape = PatientID), size = 3) +
+    scale_color_manual(values = gvhd_colors, name = "GVHD Grade") +
+    scale_fill_manual(values = ptcy_fills, guide = "none") +
+    scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+    stat_compare_means(
+      comparisons = list(c("PTCy", "No PTCy")),
+      method      = "wilcox.test",
+      label       = "p.format",
+      hide.ns     = FALSE,
+      label.y     = quantile(df_unstimulated_all$shannons.diversity, probs = 0.9),
+      size        = 5
+    ) +
+    labs(
+      x     = "PTCy Status",
+      y     = "Shannon's Diversity",
+      title = paste(rep_title, "Unstimulated")
+    ) +
+    theme_pubr() +
+    theme(legend.position = "right")
+
+  # --------------------------------------------------------------------------
+  # Plot 6: Unstimulated + Early Shannon (Donor -> <= 3, paired lines)
+  # --------------------------------------------------------------------------
+
+  unstim_3_plot_shannon <- ggplot(
+    df_unstimulated_3,
+    aes(x = timepoint, y = shannons.diversity, group = PatientID)
+  ) +
+    geom_line(aes(color = GVHD_GRADE_1), linewidth = 1.5) +
+    geom_point(aes(color = GVHD_GRADE_1, shape = PatientID), size = 5) +
+    scale_color_manual(values = gvhd_colors, name = "GVHD Grade") +
+    scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+    scale_y_continuous(labels = scales::number_format(accuracy = 1)) +
+    stat_compare_means(
+      comparisons = list(c("Donor", "<= 3")),
+      method      = "wilcox.test",
+      paired      = TRUE,
+      label       = "p.format",
+      hide.ns     = FALSE,
+      group.by    = "PatientID",
+      size        = 5,
+      label.y     = quantile(df_unstimulated_3$shannons.diversity, probs = 0.9)
+    ) +
+    labs(
+      x     = "Timepoint",
+      y     = "Shannon's Diversity",
+      title = paste(rep_title, "Donor vs Early")
+    ) +
+    theme_pubr() +
+    theme(legend.position = "right")
+
+  # --------------------------------------------------------------------------
+  # Plot 7: Earliest Timepoint - Shannon (PTCy vs No PTCy boxplot)
+  # --------------------------------------------------------------------------
+
+  earliest_plot_shannon <- ggplot(
+    df_early_timepoint_all[df_early_timepoint_all$timepoint == "Earliest Timepoint", ],
+    aes(x = PTCy, y = shannons.diversity, fill = PTCy)
+  ) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_beeswarm(aes(color = GVHD_GRADE_1, shape = PatientID), size = 3) +
+    scale_color_manual(values = gvhd_colors, name = "GVHD Grade") +
+    scale_fill_manual(values = ptcy_fills, guide = "none") +
+    scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+    scale_y_continuous(labels = scales::number_format(accuracy = 1)) +
+    stat_compare_means(
+      comparisons = list(c("PTCy", "No PTCy")),
+      method      = "wilcox.test",
+      label       = "p.format",
+      hide.ns     = FALSE,
+      label.y     = quantile(df_early_timepoint_all$shannons.diversity, probs = 0.9),
+      size        = 5
+    ) +
+    labs(
+      x     = "PTCy Status",
+      y     = "Shannon's Diversity",
+      title = paste(rep_title, "Earliest Timepoint")
+    ) +
+    theme_pubr() +
+    theme(legend.position = "right")
+
+  # --------------------------------------------------------------------------
+  # Plot 8: Early - Shannon's Diversity (<= 3 -> Earliest Timepoint)
+  # --------------------------------------------------------------------------
+
+  early_plot_shannon <- ggplot(
+    df_unstimulated_3[df_unstimulated_3$timepoint != "Donor", ],
+    aes(x = timepoint, y = shannons.diversity, group = PatientID)
+  ) +
+    geom_line(aes(color = GVHD_GRADE_1), linewidth = 1.5) +
+    geom_point(aes(color = GVHD_GRADE_1, shape = PatientID), size = 5) +
+    scale_color_manual(values = gvhd_colors, name = "GVHD Grade") +
+    scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+    scale_y_continuous(labels = scales::number_format(accuracy = 1)) +
+    stat_compare_means(
+      comparisons = list(c("<= 3", "Earliest Timepoint")),
+      paired      = TRUE,
+      label       = "p.format",
+      method.args = list(alternative = "greater"),
+      size        = 5,
+      label.y     = quantile(
+        df_unstimulated_3[df_unstimulated_3$timepoint != "Donor", ]$shannons.diversity,
+        probs = 0.9
+      )
+    ) +
+    scale_color_manual(values = gvhd_colors, name = "GVHD Grade") +
+    labs(
+      x     = "Timepoint",
+      y     = "Shannon's Diversity",
+      title = rep_title
+    ) +
+    theme_pubr() +
+    theme(legend.position = "right")
+
+  # --------------------------------------------------------------------------
+  # Plot 9: Early - Number of Clones (<= 3 -> Earliest Timepoint)
+  # --------------------------------------------------------------------------
+
+  early_plot_n_clone <- ggplot(
+    df_unstimulated_3[df_unstimulated_3$timepoint != "Donor", ],
+    aes(x = timepoint, y = n_clone, group = PatientID)
+  ) +
+    geom_line(aes(color = GVHD_GRADE_1), linewidth = 1.5) +
+    geom_point(aes(color = GVHD_GRADE_1, shape = PatientID), size = 5) +
+    scale_color_manual(values = gvhd_colors, name = "GVHD Grade") +
+    scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+    scale_y_continuous(labels = scales::number_format(accuracy = 1)) +
+    stat_compare_means(
+      comparisons = list(c("<= 3", "Earliest Timepoint")),
+      method      = "wilcox.test",
+      paired      = TRUE,
+      label       = "p.format",
+      hide.ns     = FALSE,
+      group.by    = "PatientID",
+      method.args = list(alternative = "greater"),
+      size        = 5,
+      label.y     = quantile(
+        df_unstimulated_3[df_unstimulated_3$timepoint != "Donor", ]$n_clone,
+        probs = 0.9
+      )
+    ) +
+    labs(
+      x     = "Timepoint",
+      y     = "# of Clones",
+      title = rep_title
+    ) +
+    theme_pubr() +
+    theme(legend.position = "right")
+
+  # --------------------------------------------------------------------------
+  # Plot 10: Early - Average Clone Frequency (<= 3 -> Earliest Timepoint)
+  # --------------------------------------------------------------------------
+
+  early_plot_avg_freq <- ggplot(
+    df_unstimulated_3[df_unstimulated_3$timepoint != "Donor", ],
+    aes(x = timepoint, y = avg_freq, group = PatientID)
+  ) +
+    geom_line(aes(color = GVHD_GRADE_1), linewidth = 1.5) +
+    geom_point(aes(color = GVHD_GRADE_1, shape = PatientID), size = 5) +
+    scale_color_manual(values = gvhd_colors, name = "GVHD Grade") +
+    scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+    scale_y_continuous(labels = scales::number_format(accuracy = 0.0001)) +
+    stat_compare_means(
+      comparisons = list(c("<= 3", "Earliest Timepoint")),
+      method      = "wilcox.test",
+      paired      = TRUE,
+      label       = "p.format",
+      hide.ns     = FALSE,
+      group.by    = "PatientID",
+      method.args = list(alternative = "greater"),
+      size        = 5,
+      label.y     = quantile(
+        df_unstimulated_3[df_unstimulated_3$timepoint != "Donor", ]$avg_freq,
+        probs = 0.9
+      )
+    ) +
+    labs(
+      x     = "Timepoint",
+      y     = "Average Clone Frequency",
+      title = rep_title
+    ) +
+    theme_pubr() +
+    theme(legend.position = "right")
+
+  unstim_3_plot_freq    <- unstim_3_plot_freq    + scale_x_discrete(labels = timepoint_axis_labels)
+  early_plot_freq       <- early_plot_freq       + scale_x_discrete(labels = timepoint_axis_labels)
+  unstim_3_plot_shannon <- unstim_3_plot_shannon + scale_x_discrete(labels = timepoint_axis_labels)
+  early_plot_shannon    <- early_plot_shannon    + scale_x_discrete(labels = timepoint_axis_labels)
+  early_plot_n_clone    <- early_plot_n_clone    + scale_x_discrete(labels = timepoint_axis_labels)
+  early_plot_avg_freq   <- early_plot_avg_freq   + scale_x_discrete(labels = timepoint_axis_labels)
+
+  # --------------------------------------------------------------------------
+  # Store plots in lists
+  # --------------------------------------------------------------------------
+
+  unstim_plot_freqs[[i]]      <- unstim_plot_freq
+  unstim_3_plot_freqs[[i]]    <- unstim_3_plot_freq
+  early_plot_freqs[[i]]       <- early_plot_freq
+  earliest_plot_freqs[[i]]    <- earliest_plot_freq
+  unstim_plot_shannons[[i]]   <- unstim_plot_shannon
+  unstim_3_plot_shannons[[i]] <- unstim_3_plot_shannon
+  early_plot_shannons[[i]]    <- early_plot_shannon
+  earliest_plot_shannons[[i]] <- earliest_plot_shannon
+  early_plot_n_clones[[i]]    <- early_plot_n_clone
+  early_plot_avg_freqs[[i]]   <- early_plot_avg_freq
+}
+
+# =============================================================================
+# Assemble Final Figure
+# =============================================================================
+
+# Strip legends from all panels except the last one per row
+# (we'll pull a shared legend from early_plot_shannons[[2]])
+
+early_plot_freqs[[2]]     <- early_plot_freqs[[2]]     + theme(legend.position = "none")
+early_plot_shannons[[1]]  <- early_plot_shannons[[1]]  + theme(legend.position = "none")
+
+# Extract combined legend (both GVHD Grade color + Patient ID shape)
+legend_for_plot <- cowplot::get_legend(
+  early_plot_shannons[[2]] + theme(legend.position = "right")
+)
+early_plot_shannons[[2]] <- early_plot_shannons[[2]] + theme(legend.position = "none")
+
+# Hide legends on all other panels
+early_plot_freqs[[1]]        <- early_plot_freqs[[1]]        + theme(legend.position = "none")
+early_plot_n_clones[[1]]     <- early_plot_n_clones[[1]]     + theme(legend.position = "none")
+early_plot_avg_freqs[[1]]    <- early_plot_avg_freqs[[1]]    + theme(legend.position = "none")
+early_plot_n_clones[[2]]     <- early_plot_n_clones[[2]]     + theme(legend.position = "none")
+early_plot_avg_freqs[[2]]    <- early_plot_avg_freqs[[2]]    + theme(legend.position = "none")
+
+# Build top and bottom rows (allo and nonallo)
+early_plot_top <- plot_grid(
+  early_plot_freqs[[1]],
+  early_plot_n_clones[[1]],
+  early_plot_avg_freqs[[1]],
+  early_plot_shannons[[1]],
+  nrow       = 1,
+  rel_widths = c(1, 1, 1, 1),
+  align      = "h"
+)
+
+early_plot_bot <- plot_grid(
+  early_plot_freqs[[2]],
+  early_plot_n_clones[[2]],
+  early_plot_avg_freqs[[2]],
+  early_plot_shannons[[2]],
+  nrow       = 1,
+  rel_widths = c(1, 1, 1, 1),
+  align      = "h"
+)
+
+early_plot_w0_leg <- plot_grid(early_plot_top, early_plot_bot, nrow = 2)
+
+# Add shared legend on the right
+early_plot <- plot_grid(
+  early_plot_w0_leg,
+  legend_for_plot,
+  nrow       = 1,
+  rel_widths = c(1, 0.15)
+)
+
+plot(early_plot)
+
+```
+
+# Figure 3: PTCy D3 vs Earliest Timepoint
+
+```{r save_ptcy_d3_plot}
+ggsave(
+  filename = '/Users/lingtingshi/Documents/GVHD_project/From_Michael/MLR_Pipeline/Main_fig/Figure3/PTCyD3VEarliestTP.pdf',
+  plot     = early_plot,
+  height   = 8,
+  width    = 16,
+  dpi      = 600
+)
+
+ggsave(
+  filename = '/Users/lingtingshi/Documents/GVHD_project/From_Michael/MLR_Pipeline/Main_fig/Figure3/PTCyD3VEarliestTP.png',
+  plot     = early_plot,
+  height   = 8,
+  width    = 16,
+  dpi      = 600
+)
+```
+
+
+
+```{r}
+
+for (rep_div in c("allo", "nonallo", "all")) {
+
+  if (rep_div == "allo") {
+    i          <- 1
+    rep_title  <- "Alloreactive"
+  } else if (rep_div == "nonallo") {
+    i          <- 2
+    rep_title  <- "Non-Alloreactive"
+  } else {
+    i          <- 3
+    rep_title  <- "All"
+  }
+
+  # --------------------------------------------------------------------------
+  # Data Preparation
+  # --------------------------------------------------------------------------
+
+  patient_data_allo <- dplyr::full_join(patient_data_all, meta_data, by = "PatientID") %>%
+    mutate(timepoint = SampleID) %>%
+    select(-c(SampleID))
+
+  colnames(patient_data_allo) <- sapply(
+    colnames(patient_data_allo),
+    function(x) { str_replace_all(x, "-", "") }
+  )
+
+  patient_data_allo <- patient_data_allo[patient_data_allo$Rep_div == rep_div, ]
+  patient_data_allo <- patient_data_allo[which(!is.na(patient_data_allo$timepoint)), ]
+
+  patient_data_allo[patient_data_allo$timepoint == "MLRCFSElo", ]$timepoint <- "1"
+  patient_data_allo[patient_data_allo$timepoint == "unstimulated", ]$timepoint <- "0"
+
+  patient_data_allo_copy <- patient_data_allo %>%
+    mutate(timepoint = strtoi(timepoint))
+  patient_data_allo_copy <- patient_data_allo_copy[which(!is.na(patient_data_allo_copy$timepoint)), ]
+
+  patient_data_allo_copy <- patient_data_allo_copy %>%
+    mutate(GVHD_GRADE_1 = ifelse(grepl("Severe", GVHD_GRADE_1), "Severe", GVHD_GRADE_1)) %>%
+    mutate(GVHD_GRADE_1 = factor(GVHD_GRADE_1, levels = c("No", "Mild", "Severe"))) %>%
+    replace_na(list(shannons.diversity = 0, shannons.entropy = 0))
+
+  # Unstimulated (timepoint == 0)
+  df_unstimulated <- patient_data_allo_copy[patient_data_allo_copy$timepoint == 0, ] %>%
+    mutate(timepoint = "Donor") %>%
+    filter(PTCy == "PTCy")
+
+  df_unstimulated_all <- patient_data_allo_copy[patient_data_allo_copy$timepoint == 0, ] %>%
+    mutate(timepoint = "Donor")
+
+  # Filter to post-stimulation timepoints
+  patient_data_allo_copy <- patient_data_allo_copy[patient_data_allo_copy$timepoint > 1, ]
+
+  # Early timepoints
+  df_early_timepoint_all <- get_early_timepoint(patient_data_allo_copy) %>%
+    mutate(timepoint = ifelse(timepoint <= 3, "<= 3", "Earliest Timepoint")) %>%
+    mutate(timepoint = factor(timepoint, levels = c("<= 3", "Earliest Timepoint"))) %>%
+    group_by(PatientID, GVHD_GRADE_1, timepoint)
+
+  df_early_timepoint <- df_early_timepoint_all %>%
+    filter(PTCy == "PTCy")
+  df_early_timepoint <- df_early_timepoint[df_early_timepoint$PatientID != "R070", ]
+
+  # Clinical data join
+  data_CD48_all_expand_adj <- dplyr::full_join(data_CD48_all_expand, clinical_data, by = "PatientID")
+  data_CD48_all_expand_adj <- data_CD48_all_expand_adj[!is.na(data_CD48_all_expand_adj$cdr3_amino_acid), ]
+  data_CD48_all_expand_adj <- data_CD48_all_expand_adj[data_CD48_all_expand_adj$PatientID != "R070", ]
+
+  df_timepoint <- get_timepoint(patient_data_allo_copy) %>%
+    mutate(timepoint = ifelse(timepoint <= 3 & timepoint >= 2, "<= 3", "Earliest Timepoint")) %>%
+    mutate(timepoint = factor(timepoint, levels = c("Donor", "<= 3", "Earliest Timepoint"))) %>%
+    filter(PTCy == "PTCy")
+  df_timepoint <- df_timepoint[df_timepoint$PatientID != 70, ]
+
+  df_unstimulated_3 <- bind_rows(
+    df_unstimulated %>% filter(PatientID %in% unique(df_timepoint$PatientID)),
+    df_early_timepoint
+  ) %>%
+    mutate(timepoint = factor(timepoint, levels = c("Donor", "<= 3", "Earliest Timepoint"))) %>%
+    group_by(PatientID) %>%
+    mutate(n_in = n()) %>%
+    filter(n_in >= 3) %>%
+    ungroup() %>%
+    replace_na(list(avg_freq = 0))
+
+  # --------------------------------------------------------------------------
+  # Use GLOBAL patient shape mapping (defined earlier)
+  # --------------------------------------------------------------------------
+  # All plots will now use GLOBAL_PATIENT_SHAPES for consistency
+
+  # --------------------------------------------------------------------------
+  # Plot 1: Unstimulated - Cumulative Frequency (PTCy vs No PTCy boxplot)
+  # --------------------------------------------------------------------------
+
+  unstim_plot_freq <- ggplot(
+    df_unstimulated_all,
+    aes(x = PTCy, y = cum_freq, fill = PTCy)
+  ) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_beeswarm(aes(color = GVHD_GRADE_1, shape = PatientID), size = 3) +
+    scale_color_manual(values = gvhd_colors, name = "GVHD Grade") +
+    scale_fill_manual(values = ptcy_fills, guide = "none") +
+    scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+    scale_y_continuous(labels = scales::number_format(accuracy = 0.0001)) +
+    stat_compare_means(
+      comparisons = list(c("PTCy", "No PTCy")),
+      method      = "wilcox.test",
+      label = "p.signif",
+      hide.ns     = FALSE,
+      label.y     = quantile(df_unstimulated_all$cum_freq, probs = 0.9),
+      size        = 5
+    ) +
+    labs(
+      x     = "PTCy Status",
+      y     = "Cumulative Frequency",
+      title = paste(rep_title, "Unstimulated")
+    ) +
+    theme_pubr() +
+    theme(legend.position = "right")
+
+  # --------------------------------------------------------------------------
+  # Plot 2: Unstimulated + Early Timepoints (Donor -> <= 3, paired lines)
+  # --------------------------------------------------------------------------
+
+  unstim_3_plot_freq <- ggplot(
+    df_unstimulated_3,
+    aes(x = timepoint, y = cum_freq, group = PatientID)
+  ) +
+    geom_line(aes(color = GVHD_GRADE_1), linewidth = 1.5) +
+    geom_point(aes(color = GVHD_GRADE_1, shape = PatientID), size = 5) +
+    scale_color_manual(values = gvhd_colors, name = "GVHD Grade") +
+    scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+    scale_y_continuous(labels = scales::number_format(accuracy = 0.0001)) +
+    stat_compare_means(
+      comparisons  = list(c("Donor", "<= 3")),
+      method       = "wilcox.test",
+      paired       = TRUE,
+      label = "p.signif",
+      hide.ns      = FALSE,
+      group.by     = "PatientID",
+      size         = 5,
+      label.y      = quantile(df_unstimulated_3$cum_freq, probs = 0.9)
+    ) +
+    labs(
+      x     = "Timepoint",
+      y     = "Cumulative Frequency",
+      title = paste(rep_title, "Donor vs Early")
+    ) +
+    theme_pubr() +
+    theme(legend.position = "right")
+
+  # --------------------------------------------------------------------------
+  # Plot 3: Earliest Timepoint - PTCy vs No PTCy (boxplot)
+  # --------------------------------------------------------------------------
+
+  earliest_plot_freq <- ggplot(
+    df_early_timepoint_all[df_early_timepoint_all$timepoint == "Earliest Timepoint", ],
+    aes(x = PTCy, y = cum_freq, fill = PTCy)
+  ) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_beeswarm(aes(color = GVHD_GRADE_1, shape = PatientID), size = 3) +
+    scale_color_manual(values = gvhd_colors, name = "GVHD Grade") +
+    scale_fill_manual(values = ptcy_fills, guide = "none") +
+    scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+    scale_y_continuous(labels = scales::number_format(accuracy = 0.0001)) +
+    stat_compare_means(
+      comparisons = list(c("PTCy", "No PTCy")),
+      method      = "wilcox.test",
+      label = "p.signif",
+      hide.ns     = FALSE,
+      label.y     = quantile(df_early_timepoint_all$cum_freq, probs = 0.9),
+      size        = 5
+    ) +
+    labs(
+      x     = "PTCy Status",
+      y     = "Cumulative Frequency",
+      title = paste(rep_title, "Earliest Timepoint")
+    ) +
+    theme_pubr() +
+    theme(legend.position = "right")
+
+  # --------------------------------------------------------------------------
+  # Wilcoxon test: <= 3 vs Earliest Timepoint (one-sided, greater)
+  # --------------------------------------------------------------------------
+
+  test_res <- wilcox.test(
+    cum_freq ~ timepoint,
+    data        = df_unstimulated_3[!grepl("Donor", df_unstimulated_3$timepoint), ],
+    paired      = TRUE,
+    alternative = "greater"
+  )
+  print(test_res)
+
+  # --------------------------------------------------------------------------
+  # Plot 4: Early - Cumulative Frequency (<= 3 -> Earliest Timepoint)
+  # --------------------------------------------------------------------------
+
+  early_plot_freq <- ggplot(
+    df_unstimulated_3[df_unstimulated_3$timepoint != "Donor", ],
+    aes(x = timepoint, y = cum_freq, group = PatientID)
+  ) +
+    geom_line(aes(color = GVHD_GRADE_1), linewidth = 1.5) +
+    geom_point(aes(color = GVHD_GRADE_1, shape = PatientID), size = 5) +
+    scale_color_manual(values = gvhd_colors, name = "GVHD Grade") +
+    scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+    scale_y_continuous(labels = scales::number_format(accuracy = 0.0001)) +
+    stat_compare_means(
+      comparisons  = list(c("<= 3", "Earliest Timepoint")),
+      method       = "wilcox.test",
+      paired       = TRUE,
+      label = "p.signif",
+      hide.ns      = FALSE,
+      group.by     = "PatientID",
+      method.args  = list(alternative = "greater"),
+      size         = 5,
+      label.y      = quantile(df_unstimulated_3$cum_freq, probs = 0.9)
+    ) +
+    labs(
+      x     = "Timepoint",
+      y     = "Cumulative Frequency",
+      title = rep_title
+    ) +
+    theme_pubr() +
+    theme(legend.position = "right")
+
+  # --------------------------------------------------------------------------
+  # Plot 5: Unstimulated - Shannon's Diversity (PTCy vs No PTCy boxplot)
+  # --------------------------------------------------------------------------
+
+  unstim_plot_shannon <- ggplot(
+    df_unstimulated_all,
+    aes(x = PTCy, y = shannons.diversity, fill = PTCy)
+  ) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_beeswarm(aes(color = GVHD_GRADE_1, shape = PatientID), size = 3) +
+    scale_color_manual(values = gvhd_colors, name = "GVHD Grade") +
+    scale_fill_manual(values = ptcy_fills, guide = "none") +
+    scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+    stat_compare_means(
+      comparisons = list(c("PTCy", "No PTCy")),
+      method      = "wilcox.test",
+      label = "p.signif",
+      hide.ns     = FALSE,
+      label.y     = quantile(df_unstimulated_all$shannons.diversity, probs = 0.9),
+      size        = 5
+    ) +
+    labs(
+      x     = "PTCy Status",
+      y     = "Shannon's Diversity",
+      title = paste(rep_title, "Unstimulated")
+    ) +
+    theme_pubr() +
+    theme(legend.position = "right")
+
+  # --------------------------------------------------------------------------
+  # Plot 6: Unstimulated + Early Shannon (Donor -> <= 3, paired lines)
+  # --------------------------------------------------------------------------
+
+  unstim_3_plot_shannon <- ggplot(
+    df_unstimulated_3,
+    aes(x = timepoint, y = shannons.diversity, group = PatientID)
+  ) +
+    geom_line(aes(color = GVHD_GRADE_1), linewidth = 1.5) +
+    geom_point(aes(color = GVHD_GRADE_1, shape = PatientID), size = 5) +
+    scale_color_manual(values = gvhd_colors, name = "GVHD Grade") +
+    scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+    scale_y_continuous(labels = scales::number_format(accuracy = 1)) +
+    stat_compare_means(
+      comparisons = list(c("Donor", "<= 3")),
+      method      = "wilcox.test",
+      paired      = TRUE,
+      label = "p.signif",
+      hide.ns     = FALSE,
+      group.by    = "PatientID",
+      size        = 5,
+      label.y     = quantile(df_unstimulated_3$shannons.diversity, probs = 0.9)
+    ) +
+    labs(
+      x     = "Timepoint",
+      y     = "Shannon's Diversity",
+      title = paste(rep_title, "Donor vs Early")
+    ) +
+    theme_pubr() +
+    theme(legend.position = "right")
+
+  # --------------------------------------------------------------------------
+  # Plot 7: Earliest Timepoint - Shannon (PTCy vs No PTCy boxplot)
+  # --------------------------------------------------------------------------
+
+  earliest_plot_shannon <- ggplot(
+    df_early_timepoint_all[df_early_timepoint_all$timepoint == "Earliest Timepoint", ],
+    aes(x = PTCy, y = shannons.diversity, fill = PTCy)
+  ) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_beeswarm(aes(color = GVHD_GRADE_1, shape = PatientID), size = 3) +
+    scale_color_manual(values = gvhd_colors, name = "GVHD Grade") +
+    scale_fill_manual(values = ptcy_fills, guide = "none") +
+    scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+    scale_y_continuous(labels = scales::number_format(accuracy = 1)) +
+    stat_compare_means(
+      comparisons = list(c("PTCy", "No PTCy")),
+      method      = "wilcox.test",
+      label = "p.signif",
+      hide.ns     = FALSE,
+      label.y     = quantile(df_early_timepoint_all$shannons.diversity, probs = 0.9),
+      size        = 5
+    ) +
+    labs(
+      x     = "PTCy Status",
+      y     = "Shannon's Diversity",
+      title = paste(rep_title, "Earliest Timepoint")
+    ) +
+    theme_pubr() +
+    theme(legend.position = "right")
+
+  # --------------------------------------------------------------------------
+  # Plot 8: Early - Shannon's Diversity (<= 3 -> Earliest Timepoint)
+  # --------------------------------------------------------------------------
+
+  early_plot_shannon <- ggplot(
+    df_unstimulated_3[df_unstimulated_3$timepoint != "Donor", ],
+    aes(x = timepoint, y = shannons.diversity, group = PatientID)
+  ) +
+    geom_line(aes(color = GVHD_GRADE_1), linewidth = 1.5) +
+    geom_point(aes(color = GVHD_GRADE_1, shape = PatientID), size = 5) +
+    scale_color_manual(values = gvhd_colors, name = "GVHD Grade") +
+    scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+    scale_y_continuous(labels = scales::number_format(accuracy = 1)) +
+    stat_compare_means(
+      comparisons = list(c("<= 3", "Earliest Timepoint")),
+      paired      = TRUE,
+      label = "p.signif",
+      method.args = list(alternative = "greater"),
+      size        = 5,
+      label.y     = quantile(
+        df_unstimulated_3[df_unstimulated_3$timepoint != "Donor", ]$shannons.diversity,
+        probs = 0.9
+      )
+    ) +
+    scale_color_manual(values = gvhd_colors, name = "GVHD Grade") +
+    labs(
+      x     = "Timepoint",
+      y     = "Shannon's Diversity",
+      title = rep_title
+    ) +
+    theme_pubr() +
+    theme(legend.position = "right")
+
+  # --------------------------------------------------------------------------
+  # Plot 9: Early - Number of Clones (<= 3 -> Earliest Timepoint)
+  # --------------------------------------------------------------------------
+
+  early_plot_n_clone <- ggplot(
+    df_unstimulated_3[df_unstimulated_3$timepoint != "Donor", ],
+    aes(x = timepoint, y = n_clone, group = PatientID)
+  ) +
+    geom_line(aes(color = GVHD_GRADE_1), linewidth = 1.5) +
+    geom_point(aes(color = GVHD_GRADE_1, shape = PatientID), size = 5) +
+    scale_color_manual(values = gvhd_colors, name = "GVHD Grade") +
+    scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+    scale_y_continuous(labels = scales::number_format(accuracy = 1)) +
+    stat_compare_means(
+      comparisons = list(c("<= 3", "Earliest Timepoint")),
+      method      = "wilcox.test",
+      paired      = TRUE,
+      label = "p.signif",
+      hide.ns     = FALSE,
+      group.by    = "PatientID",
+      method.args = list(alternative = "greater"),
+      size        = 5,
+      label.y     = quantile(
+        df_unstimulated_3[df_unstimulated_3$timepoint != "Donor", ]$n_clone,
+        probs = 0.9
+      )
+    ) +
+    labs(
+      x     = "Timepoint",
+      y     = "# of Clones",
+      title = rep_title
+    ) +
+    theme_pubr() +
+    theme(legend.position = "right")
+
+  # --------------------------------------------------------------------------
+  # Plot 10: Early - Average Clone Frequency (<= 3 -> Earliest Timepoint)
+  # --------------------------------------------------------------------------
+
+  early_plot_avg_freq <- ggplot(
+    df_unstimulated_3[df_unstimulated_3$timepoint != "Donor", ],
+    aes(x = timepoint, y = avg_freq, group = PatientID)
+  ) +
+    geom_line(aes(color = GVHD_GRADE_1), linewidth = 1.5) +
+    geom_point(aes(color = GVHD_GRADE_1, shape = PatientID), size = 5) +
+    scale_color_manual(values = gvhd_colors, name = "GVHD Grade") +
+    scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+    scale_y_continuous(labels = scales::number_format(accuracy = 0.0001)) +
+    stat_compare_means(
+      comparisons = list(c("<= 3", "Earliest Timepoint")),
+      method      = "wilcox.test",
+      paired      = TRUE,
+      label = "p.signif",
+      hide.ns     = FALSE,
+      group.by    = "PatientID",
+      method.args = list(alternative = "greater"),
+      size        = 5,
+      label.y     = quantile(
+        df_unstimulated_3[df_unstimulated_3$timepoint != "Donor", ]$avg_freq,
+        probs = 0.9
+      )
+    ) +
+    labs(
+      x     = "Timepoint",
+      y     = "Average Clone Frequency",
+      title = rep_title
+    ) +
+    theme_pubr() +
+    theme(legend.position = "right")
+
+  unstim_3_plot_freq    <- unstim_3_plot_freq    + scale_x_discrete(labels = timepoint_axis_labels)
+  early_plot_freq       <- early_plot_freq       + scale_x_discrete(labels = timepoint_axis_labels)
+  unstim_3_plot_shannon <- unstim_3_plot_shannon + scale_x_discrete(labels = timepoint_axis_labels)
+  early_plot_shannon    <- early_plot_shannon    + scale_x_discrete(labels = timepoint_axis_labels)
+  early_plot_n_clone    <- early_plot_n_clone    + scale_x_discrete(labels = timepoint_axis_labels)
+  early_plot_avg_freq   <- early_plot_avg_freq   + scale_x_discrete(labels = timepoint_axis_labels)
+
+  # --------------------------------------------------------------------------
+  # Store plots in lists
+  # --------------------------------------------------------------------------
+
+  unstim_plot_freqs[[i]]      <- unstim_plot_freq
+  unstim_3_plot_freqs[[i]]    <- unstim_3_plot_freq
+  early_plot_freqs[[i]]       <- early_plot_freq
+  earliest_plot_freqs[[i]]    <- earliest_plot_freq
+  unstim_plot_shannons[[i]]   <- unstim_plot_shannon
+  unstim_3_plot_shannons[[i]] <- unstim_3_plot_shannon
+  early_plot_shannons[[i]]    <- early_plot_shannon
+  earliest_plot_shannons[[i]] <- earliest_plot_shannon
+  early_plot_n_clones[[i]]    <- early_plot_n_clone
+  early_plot_avg_freqs[[i]]   <- early_plot_avg_freq
+}
+
+# =============================================================================
+# Assemble Final Figure
+# =============================================================================
+
+# Strip legends from all panels except the last one per row
+# (we'll pull a shared legend from early_plot_shannons[[2]])
+
+early_plot_freqs[[2]]     <- early_plot_freqs[[2]]     + theme(legend.position = "none")
+early_plot_shannons[[1]]  <- early_plot_shannons[[1]]  + theme(legend.position = "none")
+
+# Extract combined legend (both GVHD Grade color + Patient ID shape)
+legend_for_plot <- cowplot::get_legend(
+  early_plot_shannons[[2]] + theme(legend.position = "right")
+)
+early_plot_shannons[[2]] <- early_plot_shannons[[2]] + theme(legend.position = "none")
+
+# Hide legends on all other panels
+early_plot_freqs[[1]]        <- early_plot_freqs[[1]]        + theme(legend.position = "none")
+early_plot_n_clones[[1]]     <- early_plot_n_clones[[1]]     + theme(legend.position = "none")
+early_plot_avg_freqs[[1]]    <- early_plot_avg_freqs[[1]]    + theme(legend.position = "none")
+early_plot_n_clones[[2]]     <- early_plot_n_clones[[2]]     + theme(legend.position = "none")
+early_plot_avg_freqs[[2]]    <- early_plot_avg_freqs[[2]]    + theme(legend.position = "none")
+
+# Build top and bottom rows (allo and nonallo)
+early_plot_top <- plot_grid(
+  early_plot_freqs[[1]],
+  early_plot_n_clones[[1]],
+  early_plot_avg_freqs[[1]],
+  early_plot_shannons[[1]],
+  nrow       = 1,
+  rel_widths = c(1, 1, 1, 1),
+  align      = "h"
+)
+
+early_plot_bot <- plot_grid(
+  early_plot_freqs[[2]],
+  early_plot_n_clones[[2]],
+  early_plot_avg_freqs[[2]],
+  early_plot_shannons[[2]],
+  nrow       = 1,
+  rel_widths = c(1, 1, 1, 1),
+  align      = "h"
+)
+
+early_plot_w0_leg <- plot_grid(early_plot_top, early_plot_bot, nrow = 2)
+
+# Add shared legend on the right
+early_plot <- plot_grid(
+  early_plot_w0_leg,
+  legend_for_plot,
+  nrow       = 1,
+  rel_widths = c(1, 0.15)
+)
+
+plot(early_plot)
+
+ggsave(
+  filename = '/Users/lingtingshi/Documents/GVHD_project/From_Michael/MLR_Pipeline/Main_fig/Figure3/PTCyD3VEarliestTP_sig.pdf',
+  plot     = early_plot,
+  height   = 8,
+  width    = 16,
+  dpi      = 600
+)
+
+ggsave(
+  filename = '/Users/lingtingshi/Documents/GVHD_project/From_Michael/MLR_Pipeline/Main_fig/Figure3/PTCyD3VEarliestTP_sig.png',
+  plot     = early_plot,
+  height   = 8,
+  width    = 16,
+  dpi      = 600
+)
+
+ggsave(
+  filename = '/Users/lingtingshi/Documents/GVHD_project/From_Michael/MLR_Pipeline/Main_fig/Figure3/PTCyD3VEarliestTP_sig.svg',
+  plot     = early_plot,
+  height   = 8,
+  width    = 16,
+  dpi      = 600
+)
+```
+
+# Absolute Difference Analysis
+
+## Absolute Difference: Severe vs No/Mild
+
+Compare absolute changes |Engraftment - ≤D3| between GVHD severity groups using Wilcoxon rank-sum tests.
+
+```{r fig.height = 8, fig.width=16, dpi = 600}
+
+diff_plot_list <- list()
+
+for (rep_div in c("allo", "nonallo")) {
+  
+  rep_title <- ifelse(rep_div == "allo", "Alloreactive", "Non-Alloreactive")
+  
+  # --------------------------------------------------------------------------
+  # Rebuild data for this rep_div
+  # --------------------------------------------------------------------------
+  patient_data_allo <- dplyr::full_join(patient_data_all, meta_data, by = "PatientID") %>%
+    mutate(timepoint = SampleID) %>%
+    select(-SampleID)
+  
+  colnames(patient_data_allo) <- sapply(colnames(patient_data_allo),
+                                         function(x) str_replace_all(x, "-", ""))
+  
+  patient_data_allo <- patient_data_allo %>%
+    filter(Rep_div == rep_div, !is.na(timepoint)) %>%
+    mutate(timepoint = case_when(
+      timepoint == "MLRCFSElo"    ~ "1",
+      timepoint == "unstimulated" ~ "0",
+      TRUE                        ~ timepoint
+    )) %>%
+    mutate(timepoint = strtoi(timepoint)) %>%
+    filter(!is.na(timepoint)) %>%
+    mutate(
+      GVHD_GRADE_1 = ifelse(grepl("Severe", GVHD_GRADE_1), "Severe", GVHD_GRADE_1),
+      GVHD_GRADE_1 = factor(GVHD_GRADE_1, levels = c("No", "Mild", "Severe"))
+    ) %>%
+    replace_na(list(shannons.diversity = 0, shannons.entropy = 0))
+  
+  # Donor (unstimulated, PTCy only)
+  df_unstimulated <- patient_data_allo %>%
+    filter(timepoint == 0, PTCy == "PTCy") %>%
+    mutate(timepoint_label = "Donor")
+  
+  # Post-stimulation
+  patient_data_post <- patient_data_allo %>% filter(timepoint > 1)
+  
+  # Early timepoints via helper
+  df_early <- get_early_timepoint(patient_data_post) %>%
+    mutate(timepoint_label = ifelse(timepoint <= 3, "<= 3", "Earliest Timepoint")) %>%
+    mutate(timepoint_label = factor(timepoint_label,
+                                     levels = c("<= 3", "Earliest Timepoint"))) %>%
+    filter(PTCy == "PTCy", PatientID != "R070")
+  
+  # Reconstruct df_unstimulated_3 equivalent
+  df_timepoint_check <- get_timepoint(patient_data_post) %>%
+    mutate(timepoint_label = ifelse(timepoint <= 3 & timepoint >= 2,
+                                     "<= 3", "Earliest Timepoint")) %>%
+    filter(PTCy == "PTCy", PatientID != "R070")
+  
+  df_u3 <- bind_rows(
+    df_unstimulated %>%
+      filter(PatientID %in% unique(df_timepoint_check$PatientID)) %>%
+      mutate(timepoint_label = "Donor"),
+    df_early
+  ) %>%
+    mutate(timepoint_label = factor(timepoint_label,
+                                     levels = c("Donor", "<= 3", "Earliest Timepoint"))) %>%
+    group_by(PatientID) %>%
+    mutate(n_in = n()) %>%
+    filter(n_in >= 3) %>%
+    ungroup() %>%
+    replace_na(list(avg_freq = 0))
+  
+  # --------------------------------------------------------------------------
+  # Pivot wide: one row per patient with early and engraftment columns
+  # Average within timepoint in case of duplicate day 2/3 rows
+  # --------------------------------------------------------------------------
+  df_wide <- df_u3 %>%
+    filter(timepoint_label != "Donor") %>%
+    select(PatientID, GVHD_GRADE_1, timepoint_label,
+           cum_freq, shannons.diversity, n_clone, avg_freq) %>%
+    group_by(PatientID, GVHD_GRADE_1, timepoint_label) %>%
+    summarise(across(c(cum_freq, shannons.diversity, n_clone, avg_freq),
+                     mean, na.rm = TRUE), .groups = "drop") %>%
+    pivot_wider(
+      names_from  = timepoint_label,
+      values_from = c(cum_freq, shannons.diversity, n_clone, avg_freq)
+    )
+  
+  # Clean column names
+  colnames(df_wide) <- colnames(df_wide) %>%
+    str_replace_all("<= 3", "early") %>%
+    str_replace_all("Earliest Timepoint", "engraft") %>%
+    str_replace_all(" ", "_")
+  
+  # --------------------------------------------------------------------------
+  # Compute absolute differences + severity grouping
+  # --------------------------------------------------------------------------
+  df_diff <- df_wide %>%
+    mutate(
+      diff_cum_freq   = `cum_freq_engraft`            - `cum_freq_early`,
+      diff_shannon    = `shannons.diversity_engraft`   - `shannons.diversity_early`,
+      diff_n_clone    = `n_clone_engraft`              - `n_clone_early`,
+      diff_avg_freq   = `avg_freq_engraft`             - `avg_freq_early`
+    ) %>%
+    mutate(
+      severity_group = ifelse(GVHD_GRADE_1 == "Severe", "Severe", "No/Mild"),
+      severity_group = factor(severity_group, levels = c("No/Mild", "Severe"))
+    )
+  
+  # --------------------------------------------------------------------------
+  # Wilcoxon rank-sum tests (printed to console)
+  # --------------------------------------------------------------------------
+  diff_cols    <- c("diff_cum_freq", "diff_shannon", "diff_n_clone", "diff_avg_freq")
+  diff_labels  <- c("Cumulative Frequency", "Shannon's Diversity",
+                    "# of Clones", "Avg Clone Frequency")
+  
+  cat("\n====", rep_title, "====\n")
+  for (dc in diff_cols) {
+    res <- wilcox.test(as.formula(paste(dc, "~ severity_group")),
+                       data        = df_diff,
+                       alternative = "two.sided",
+                       exact       = FALSE)
+    cat(sprintf("%-20s  W = %.1f,  p = %.4f\n", dc, res$statistic, res$p.value))
+  }
+  
+  # --------------------------------------------------------------------------
+  # Use GLOBAL patient shapes
+  # --------------------------------------------------------------------------
+  
+  # --------------------------------------------------------------------------
+  # One panel per metric
+  # --------------------------------------------------------------------------
+  metrics <- list(
+    list(col = "diff_cum_freq",  label = "Cumulative Frequency"),
+    list(col = "diff_n_clone",   label = "# of Clones"),
+    list(col = "diff_avg_freq",  label = "Avg Clone Frequency"),
+    list(col = "diff_shannon",   label = "Shannon's Diversity")
+  )
+  
+  panel_list <- list()
+  
+  for (m in metrics) {
+    dc   <- m$col
+    ymax <- quantile(df_diff[[dc]], 0.95, na.rm = TRUE) * 1.35
+    
+    p <- ggplot(df_diff,
+                aes_string(x = "severity_group", y = dc)) +
+      geom_boxplot(aes(color = severity_group), fill = NA, outlier.shape = NA, width = 0.45, linewidth = 1) +
+      geom_jitter(aes(shape = PatientID, color = GVHD_GRADE_1), size = 5, width = 0.12) +
+      scale_color_manual(
+        values = c("No/Mild" = "#058B8E", "Severe" = "#B85000",
+                   "No" = "#09BB8C", "Mild" = "#005A8F"),
+        breaks = c("No", "Mild", "Severe"),
+        name   = "GVHD Grade"
+      ) +
+      scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+      stat_compare_means(
+        comparisons = list(c("No/Mild", "Severe")),
+        method      = "wilcox.test",
+        label       = "p.format",
+        hide.ns     = FALSE,
+        size         = 6,              # bigger text
+        label.y.npc  = "top",          # always at top of panel
+        vjust        = 0.3,           # push slightly above bracket
+        tip.length   = 0.01
+      ) +
+      labs(
+        x     = "GVHD Grade",
+        y     = paste0("|Δ| ", m$label),
+        title = paste0(rep_title, "\nEngraft − ≤D3")
+      ) +
+      theme_pubr() +
+      theme(legend.position = "right")
+    
+    panel_list[[dc]] <- p
+  }
+  
+  # --------------------------------------------------------------------------
+  # Assemble 4 panels into one row
+  # --------------------------------------------------------------------------
+  combined <- plot_grid(plotlist = panel_list, nrow = 1)
+  diff_plot_list[[rep_div]] <- combined
+  plot(combined)
+  
+  # --------------------------------------------------------------------------
+  # Save
+  # --------------------------------------------------------------------------
+  out <- paste0(
+    '/Users/lingtingshi/Documents/GVHD_project/From_Michael/MLR_Pipeline/Main_fig/Figure3/absdiff_',
+    rep_div, '_severe_vs_nomild'
+  )
+  ggsave(paste0(out, '.png'), combined, height = 6, width = 16, dpi = 600)
+  ggsave(paste0(out, '.pdf'), combined, height = 6, width = 16, dpi = 600)
+  ggsave(paste0(out, '.svg'), combined, height = 6, width = 16, dpi = 600)
+}
+
+# =============================================================================
+# Optional: stack allo and nonallo into one combined figure
+# =============================================================================
+final_diff_plot <- plot_grid(
+  diff_plot_list[["allo"]],
+  diff_plot_list[["nonallo"]],
+  nrow   = 2,
+  labels = c("Alloreactive", "Non-Alloreactive"),
+  label_size = 12
+)
+plot(final_diff_plot)
+
+ggsave(
+  '/Users/lingtingshi/Documents/GVHD_project/From_Michael/MLR_Pipeline/Main_fig/Figure3/absdiff_combined_severe_vs_nomild.pdf',
+  final_diff_plot,
+  height = 12, width = 16, dpi = 600)
+```
+
+# Relative Difference Analysis
+
+## Relative Difference: Severe vs No/Mild
+
+Compare relative changes (Engraftment - ≤D3) / ≤D3 between GVHD severity groups.
+
+```{r  fig.height = 8, fig.width=16, dpi = 600}
+diff_plot_list <- list()
+
+for (rep_div in c("allo", "nonallo")) {
+  rep_title <- ifelse(rep_div == "allo", "Alloreactive", "Non-Alloreactive")
+
+  # --------------------------------------------------------------------------
+  # Rebuild data for this rep_div  [UNCHANGED]
+  # --------------------------------------------------------------------------
+  patient_data_allo <- dplyr::full_join(patient_data_all, meta_data, by = "PatientID") %>%
+    mutate(timepoint = SampleID) %>%
+    select(-SampleID)
+
+  colnames(patient_data_allo) <- sapply(colnames(patient_data_allo),
+                                         function(x) str_replace_all(x, "-", ""))
+
+  patient_data_allo <- patient_data_allo %>%
+    filter(Rep_div == rep_div, !is.na(timepoint)) %>%
+    mutate(timepoint = case_when(
+      timepoint == "MLRCFSElo"    ~ "1",
+      timepoint == "unstimulated" ~ "0",
+      TRUE                        ~ timepoint
+    )) %>%
+    mutate(timepoint = strtoi(timepoint)) %>%
+    filter(!is.na(timepoint)) %>%
+    mutate(
+      GVHD_GRADE_1 = ifelse(grepl("Severe", GVHD_GRADE_1), "Severe", GVHD_GRADE_1),
+      GVHD_GRADE_1 = factor(GVHD_GRADE_1, levels = c("No", "Mild", "Severe"))
+    ) %>%
+    replace_na(list(shannons.diversity = 0, shannons.entropy = 0))
+
+  df_unstimulated <- patient_data_allo %>%
+    filter(timepoint == 0, PTCy == "PTCy") %>%
+    mutate(timepoint_label = "Donor")
+
+  patient_data_post <- patient_data_allo %>% filter(timepoint > 1)
+
+  df_early <- get_early_timepoint(patient_data_post) %>%
+    mutate(timepoint_label = ifelse(timepoint <= 3, "<= 3", "Earliest Timepoint")) %>%
+    mutate(timepoint_label = factor(timepoint_label,
+                                     levels = c("<= 3", "Earliest Timepoint"))) %>%
+    filter(PTCy == "PTCy", PatientID != "R070")
+
+  df_timepoint_check <- get_timepoint(patient_data_post) %>%
+    mutate(timepoint_label = ifelse(timepoint <= 3 & timepoint >= 2,
+                                     "<= 3", "Earliest Timepoint")) %>%
+    filter(PTCy == "PTCy", PatientID != "R070")
+
+  df_u3 <- bind_rows(
+    df_unstimulated %>%
+      filter(PatientID %in% unique(df_timepoint_check$PatientID)) %>%
+      mutate(timepoint_label = "Donor"),
+    df_early
+  ) %>%
+    mutate(timepoint_label = factor(timepoint_label,
+                                     levels = c("Donor", "<= 3", "Earliest Timepoint"))) %>%
+    group_by(PatientID) %>%
+    mutate(n_in = n()) %>%
+    filter(n_in >= 3) %>%
+    ungroup() %>%
+    replace_na(list(avg_freq = 0))
+
+  # --------------------------------------------------------------------------
+  # Pivot wide  [UNCHANGED]
+  # --------------------------------------------------------------------------
+  df_wide <- df_u3 %>%
+    filter(timepoint_label != "Donor") %>%
+    select(PatientID, GVHD_GRADE_1, timepoint_label,
+           cum_freq, shannons.diversity, n_clone, avg_freq) %>%
+    group_by(PatientID, GVHD_GRADE_1, timepoint_label) %>%
+    summarise(across(c(cum_freq, shannons.diversity, n_clone, avg_freq),
+                     mean, na.rm = TRUE), .groups = "drop") %>%
+    pivot_wider(
+      names_from  = timepoint_label,
+      values_from = c(cum_freq, shannons.diversity, n_clone, avg_freq)
+    )
+
+  colnames(df_wide) <- colnames(df_wide) %>%
+    str_replace_all("<= 3", "early") %>%
+    str_replace_all("Earliest Timepoint", "engraft") %>%
+    str_replace_all(" ", "_")
+
+  # --------------------------------------------------------------------------
+  # CHANGED: Relative change (Engraft - Early) / Early; drop zero baselines
+  # --------------------------------------------------------------------------
+  df_diff <- df_wide %>%
+    # Drop patients where any early baseline is zero (would cause division by zero)
+    filter(
+      cum_freq_early            > 0,
+      shannons.diversity_early  > 0,
+      n_clone_early             > 0,
+      avg_freq_early            > 0
+    ) %>%
+    mutate(
+      diff_cum_freq = (cum_freq_engraft           - cum_freq_early)           / cum_freq_early,
+      diff_shannon  = (shannons.diversity_engraft  - shannons.diversity_early) / shannons.diversity_early,
+      diff_n_clone  = (n_clone_engraft             - n_clone_early)            / n_clone_early,
+      diff_avg_freq = (avg_freq_engraft            - avg_freq_early)           / avg_freq_early
+    ) %>%
+    mutate(
+      severity_group = ifelse(GVHD_GRADE_1 == "Severe", "Severe", "No/Mild"),
+      severity_group = factor(severity_group, levels = c("No/Mild", "Severe"))
+    )
+
+  # --------------------------------------------------------------------------
+  # Wilcoxon rank-sum tests  [UNCHANGED logic, updated labels]
+  # --------------------------------------------------------------------------
+  diff_cols   <- c("diff_cum_freq", "diff_shannon", "diff_n_clone", "diff_avg_freq")
+  diff_labels <- c("Cumulative Frequency", "Shannon's Diversity",
+                   "# of Clones", "Avg Clone Frequency")
+
+  cat("\n====", rep_title, "====\n")
+  for (dc in diff_cols) {
+    res <- wilcox.test(as.formula(paste(dc, "~ severity_group")),
+                       data        = df_diff,
+                       alternative = "two.sided",
+                       exact       = FALSE)
+    cat(sprintf("%-20s  W = %.1f,  p = %.4f\n", dc, res$statistic, res$p.value))
+  }
+
+  # --------------------------------------------------------------------------
+  # Use GLOBAL patient shapes
+  # --------------------------------------------------------------------------
+
+  # --------------------------------------------------------------------------
+  # CHANGED: y-axis label now reflects relative change (proportion)
+  # --------------------------------------------------------------------------
+  metrics <- list(
+    list(col = "diff_cum_freq", label = "Cumulative Frequency"),
+    list(col = "diff_n_clone",  label = "# of Clones"),
+    list(col = "diff_avg_freq", label = "Avg Clone Frequency"),
+    list(col = "diff_shannon",  label = "Shannon's Diversity")
+  )
+
+  panel_list <- list()
+
+  for (m in metrics) {
+    dc <- m$col
+
+    p <- ggplot(df_diff,
+                aes_string(x = "severity_group", y = dc)) +
+      geom_boxplot(aes(color = severity_group), fill = NA, outlier.shape = NA, width = 0.45, linewidth = 1) +
+      geom_jitter(aes(shape = PatientID, color = GVHD_GRADE_1), size = 5, width = 0.12) +
+      scale_color_manual(
+        values = c("No/Mild" = "#058B8E", "Severe" = "#B85000",
+                   "No" = "#09BB8C", "Mild" = "#005A8F"),
+        breaks = c("No", "Mild", "Severe"),
+        name   = "GVHD Grade"
+      ) +
+      scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+      stat_compare_means(
+        comparisons = list(c("No/Mild", "Severe")),
+        method      = "wilcox.test",
+        label       = "p.format",
+        hide.ns     = FALSE,
+        size        = 6,
+        label.y.npc = "top",
+        vjust       = 0.3,
+        tip.length  = 0.01
+      ) +
+      labs(
+        x     = "GVHD Grade",
+        y     = paste0("Relative Δ ", m$label, "\n(Engraft − ≤D3) / ≤D3"),  # CHANGED
+        title = paste0(rep_title, "\n(Engraft − ≤D3) / ≤D3")                 # CHANGED
+      ) +
+      theme_pubr() +
+      theme(legend.position = "right")
+
+    panel_list[[dc]] <- p
+  }
+
+  # --------------------------------------------------------------------------
+  # Assemble + save  [UNCHANGED]
+  # --------------------------------------------------------------------------
+  combined <- plot_grid(plotlist = panel_list, nrow = 1)
+  diff_plot_list[[rep_div]] <- combined
+  plot(combined)
+
+  out <- paste0(
+    '/Users/lingtingshi/Documents/GVHD_project/From_Michael/MLR_Pipeline/Main_fig/Figure3/reldiff_',
+    rep_div, '_severe_vs_nomild'   # CHANGED prefix: reldiff_ instead of absdiff_
+  )
+  ggsave(paste0(out, '.png'), combined, height = 6, width = 16, dpi = 600)
+  ggsave(paste0(out, '.pdf'), combined, height = 6, width = 16, dpi = 600)
+  ggsave(paste0(out, '.svg'), combined, height = 6, width = 16, dpi = 600)
+}
+
+# =============================================================================
+# Combined figure  [UNCHANGED, updated filename]
+# =============================================================================
+final_diff_plot <- plot_grid(
+  diff_plot_list[["allo"]],
+  diff_plot_list[["nonallo"]],
+  nrow       = 2,
+  labels     = c("Alloreactive", "Non-Alloreactive"),
+  label_size = 12
+)
+plot(final_diff_plot)
+ggsave(
+  '/Users/lingtingshi/Documents/GVHD_project/From_Michael/MLR_Pipeline/Main_fig/Figure3/reldiff_combined_severe_vs_nomild.pdf',
+  final_diff_plot,
+  height = 12, width = 16, dpi = 600
+)
+```
+
+
+```{r}
+# Calculate ratio of allo to nonallo frequency for each patient with timepoint 2, 3, or unstimulated
+calculate_ratios <- function(data, patient_clinical_data, timepoints_to_include = c("2", "3")) {
+  # Get unique patients with the specified timepoints
+  patients <- unique(data$PatientID[data$timepoint %in% timepoints_to_include])
+  timepoints_to_include = c("2", "3", "unstimulated")
+  
+  # Initialize results dataframe
+  results <- data.frame(
+    PatientID = character(),
+    timepoint = character(),  # Changed to character to accommodate "unstimulated"
+    allo_frequency = numeric(),
+    nonallo_frequency = numeric(),
+    ratio = numeric(),
+    DonorType = character(),
+    Disease = character(),
+    PTCy = character(),
+    GVHD_GRADE_1 = character(),
+    stringsAsFactors = FALSE
+  )
+  
+  # Calculate ratio for each patient and timepoint
+  for (patient in patients) {
+    for (tp in timepoints_to_include) {
+      # Check if this patient has data for this timepoint
+      if (nrow(data[data$PatientID == patient & data$timepoint == tp, ]) > 0) {
+        # Calculate allo frequency
+        allo_data <- data %>%
+          filter(type == "allo" & timepoint == tp & PatientID == patient)
+        allo_f <- sum(allo_data$frequency)
+        
+        # Calculate nonallo frequency
+        nonallo_data <- data %>%
+          filter(type == "nonallo" & timepoint == tp & PatientID == patient)
+        nonallo_f <- sum(nonallo_data$frequency)
+        
+        # Calculate ratio (handle division by zero)
+        if (nonallo_f > 0) {
+          ratio <- allo_f / nonallo_f
+        } else {
+          ratio <- NA  # or could use Inf if you prefer
+        }
+        
+        # Get clinical data for this patient
+        patient_data <- patient_clinical_data[patient_clinical_data$PatientID == patient, ]
+        
+        # If patient exists in clinical data, add all information
+        if (nrow(patient_data) > 0) {
+          results <- rbind(results, data.frame(
+            PatientID = patient,
+            timepoint = tp,
+            allo_frequency = allo_f,
+            nonallo_frequency = nonallo_f,
+            ratio = ratio,
+            DonorType = patient_data$DonorType,
+            Disease = patient_data$Disease,
+            PTCy = patient_data$PTCy,
+            GVHD_GRADE_1 = patient_data$GVHD_GRADE_1,
+            stringsAsFactors = FALSE
+          ))
+        } else {
+          # If patient doesn't exist in clinical data, add results without clinical info
+          results <- rbind(results, data.frame(
+            PatientID = patient,
+            timepoint = tp,
+            allo_frequency = allo_f,
+            nonallo_frequency = nonallo_f,
+            ratio = ratio,
+            DonorType = NA,
+            Disease = NA,
+            PTCy = NA,
+            GVHD_GRADE_1 = NA,
+            stringsAsFactors = FALSE
+          ))
+        }
+      }
+    }
+  }
+  
+  return(results)
+}
+
+# Use the function to get ratios with clinical information
+ratio_results <- calculate_ratios(data_all_squished,meta_data_clin)
+
+```
+
+# Alloreactive / Non-Alloreactive Ratio Analysis
+
+## Ratio Calculation and Data Preparation
+
+
+```{r}
+
+ratio_results$timepoint_modified <- ifelse(
+  ratio_results$timepoint %in% c("2", "3"), "2/3",
+  as.character(ratio_results$timepoint)
+)
+
+ratio_results$grade_modified <- ifelse(
+  ratio_results$GVHD_GRADE_1 %in% c("Unclassified/Severe"), "Severe",
+  as.character(ratio_results$GVHD_GRADE_1)
+)
+
+ratio_results$timepoint_modified <- factor(
+  ratio_results$timepoint_modified,
+  levels = c("unstimulated", "2/3")
+)
+
+# Ensure grade_modified is also a factor with consistent level order
+ratio_results$grade_modified <- factor(
+  ratio_results$grade_modified,
+  levels = c("No", "Mild", "Severe")
+)
+
+# -----------------------------------------------------------------------------
+# Use GLOBAL patient shapes (Ratio plot section)
+# -----------------------------------------------------------------------------
+
+ratio_filtered <- ratio_results
+
+# -----------------------------------------------------------------------------
+# Plot
+# -----------------------------------------------------------------------------
+
+early_plot_avg_freq <- ggplot(
+  ratio_filtered,
+  aes(x = timepoint_modified, y = ratio, group = PatientID)
+) +
+  geom_line(aes(color = grade_modified), linewidth = 1.5) +
+  geom_point(aes(color = grade_modified, shape = PatientID), size = 6) +
+  scale_color_manual(values = gvhd_colors, name = "GVHD Grade",
+                     drop = FALSE) +
+  scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+  scale_y_log10(labels = scales::number_format(accuracy = 0.1)) + 
+  stat_compare_means(
+    comparisons = list(c("unstimulated", "2/3")),
+    method      = "wilcox.test",
+    paired      = TRUE,
+    label       = "p.format",
+    hide.ns     = FALSE,
+    group.by    = "PatientID",
+    method.args = list(alternative = "less"),
+    size        = 6,
+    label.y     = quantile(ratio_filtered$ratio, probs = 0.90)
+  ) +
+  labs(
+    x     = "Timepoint",
+    y     = "Allo / Non-Allo raito (Cumulative Frequency)",
+    title = ""
+  ) +
+  theme_pubr() +
+  theme(legend.position = "right")   # change to "right" to show legends
+
+early_plot_avg_freq <- early_plot_avg_freq + scale_x_discrete(labels = timepoint_axis_labels)
+
+plot(early_plot_avg_freq)
+
+# -----------------------------------------------------------------------------
+# Save
+# -----------------------------------------------------------------------------
+
+out_base <- '/Users/lingtingshi/Documents/GVHD_project/From_Michael/MLR_Pipeline/Main_fig/Figure3/allovsnonallo'
+
+ggsave(paste0(out_base, '.png'), early_plot_avg_freq, height = 4, width = 5, dpi = 600)
+ggsave(paste0(out_base, '.pdf'), early_plot_avg_freq, height = 4, width = 5, dpi = 600)
+ggsave(paste0(out_base, '.svg'), early_plot_avg_freq, height = 4, width = 5, dpi = 600)
+```
+
+```{r}
+ratio_results$timepoint_modified <- ifelse(
+  ratio_results$timepoint %in% c("2", "3"), "2/3",
+  as.character(ratio_results$timepoint)
+)
+ratio_results$grade_modified <- ifelse(
+  ratio_results$GVHD_GRADE_1 %in% c("Unclassified/Severe"), "Severe",
+  as.character(ratio_results$GVHD_GRADE_1)
+)
+ratio_results$timepoint_modified <- factor(
+  ratio_results$timepoint_modified,
+  levels = c("unstimulated", "2/3")
+)
+ratio_results$grade_modified <- factor(
+  ratio_results$grade_modified,
+  levels = c("No", "Mild", "Severe")
+)
+
+# -----------------------------------------------------------------------------
+# Use GLOBAL patient shapes (Ratio plot section)
+# -----------------------------------------------------------------------------
+ratio_filtered <- ratio_results
+
+# -----------------------------------------------------------------------------
+# Plot
+# -----------------------------------------------------------------------------
+early_plot_avg_freq <- ggplot(
+  ratio_filtered,
+  aes(x = timepoint_modified, y = ratio, group = PatientID)
+) +
+  geom_line(aes(color = grade_modified), linewidth = 1.5) +
+  geom_point(aes(color = grade_modified, shape = PatientID), size = 6) +
+  scale_color_manual(values = gvhd_colors, name = "GVHD Grade",
+                     drop = FALSE) +
+  scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+  scale_y_log10(labels = scales::number_format(accuracy = 0.1)) + 
+  stat_compare_means(
+    comparisons = list(c("unstimulated", "2/3")),
+    method      = "wilcox.test",
+    paired      = TRUE,
+    label       = "p.signif",
+    hide.ns     = FALSE,
+    group.by    = "PatientID",
+    method.args = list(alternative = "less"),
+    size        = 6,
+    label.y     = quantile(ratio_filtered$ratio, probs = 0.90)
+  ) +
+  labs(
+    x     = "Timepoint",
+    y     = "Allo / Non-Allo ratio (Cumulative Frequency)",
+    title = ""
+  ) +
+  theme_pubr() +
+  theme(legend.position = "none")
+
+early_plot_avg_freq <- early_plot_avg_freq + scale_x_discrete(labels = timepoint_axis_labels)
+plot(early_plot_avg_freq)
+
+# -----------------------------------------------------------------------------
+# Save
+# -----------------------------------------------------------------------------
+out_base <- '/Users/lingtingshi/Documents/GVHD_project/From_Michael/MLR_Pipeline/Main_fig/Figure3/allovsnonallo_nolegend'
+ggsave(paste0(out_base, '.png'), early_plot_avg_freq, height = 3.3, width = 3, dpi = 600)
+ggsave(paste0(out_base, '.pdf'), early_plot_avg_freq, height = 3.3, width = 3, dpi = 600)
+ggsave(paste0(out_base, '.svg'), early_plot_avg_freq, height = 3.3, width = 3, dpi = 600)
+```
+
+
+```{r}
+# -----------------------------------------------------------------------------
+# D3 only: Severe vs. Non-Severe comparison
+# -----------------------------------------------------------------------------
+
+# Filter to 2/3 timepoint only
+ratio_d3 <- ratio_results[ratio_results$timepoint_modified == "2/3",]
+
+# Create binary grouping: Severe vs. Rest
+ratio_d3$severity_group <- ifelse(
+  ratio_d3$grade_modified == "Severe", "Severe", "Non-Severe"
+)
+ratio_d3$severity_group <- factor(ratio_d3$severity_group,
+                                   levels = c("Non-Severe", "Severe"))
+
+# Wilcoxon rank-sum test (unpaired, non-parametric)
+wilcox_result <- wilcox.test(
+  ratio ~ severity_group,
+  data        = ratio_d3,
+  alternative = "two.sided",   # or "less"/"greater" if you have a directional hypothesis
+  exact       = FALSE
+)
+print(wilcox_result)
+
+# -----------------------------------------------------------------------------
+# Plot: D3 only, Severe vs. Non-Severe (uses GLOBAL shapes)
+# -----------------------------------------------------------------------------
+d3_plot <- ggplot(ratio_d3,
+                  aes(x = severity_group, y = ratio)) +
+  geom_boxplot(aes(color = severity_group), fill = NA, outlier.shape = NA, width = 0.4, linewidth = 1) +
+  geom_jitter(aes(shape = PatientID, color = grade_modified), size = 5, width = 0.1) +
+  scale_color_manual(
+    values = c("Non-Severe" = "#058B8E", "Severe" = "#B85000",
+               "No" = "#09BB8C", "Mild" = "#005A8F"),
+    breaks = c("No", "Mild", "Severe"),
+    name = "GVHD Grade"
+  ) +
+  scale_shape_manual(values = GLOBAL_PATIENT_SHAPES, name = "Patient ID") +
+  scale_y_log10() +
+  stat_compare_means(
+    method       = "wilcox.test",
+    comparisons  = list(c("Non-Severe", "Severe")),
+    label        = "p.format",
+    hide.ns      = FALSE,
+    size         = 6,
+    vjust       = 0.3
+  ) +
+  labs(
+    x     = "Group",
+    y     = "Allo / Non-Allo Ratio (Cumulative Frequency)",
+    title = "Severe vs. Non-Severe"
+  ) +
+  theme_pubr() +
+  theme(legend.position = "right")
+
+plot(d3_plot)
+
+# -----------------------------------------------------------------------------
+# Save
+# -----------------------------------------------------------------------------
+out_base_d3 <- '/Users/lingtingshi/Documents/GVHD_project/From_Michael/MLR_Pipeline/Main_fig/Figure3/allovsnonallo_d3_severe'
+ggsave(paste0(out_base_d3, '.png'), d3_plot, height = 4, width = 4, dpi = 600)
+ggsave(paste0(out_base_d3, '.pdf'), d3_plot, height = 4, width = 4, dpi = 600)
+ggsave(paste0(out_base_d3, '.svg'), d3_plot, height = 4, width = 4, dpi = 600)
+```
+

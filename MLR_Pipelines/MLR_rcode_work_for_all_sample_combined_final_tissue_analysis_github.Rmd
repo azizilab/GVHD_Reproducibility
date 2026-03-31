@@ -1,0 +1,1167 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code.
+
+Try executing this chunk by clicking the Run button within the chunk or by placing your cursor inside it and pressing Cmd+Shift+Enter.
+
+```{r}
+gc() 
+rm(list = ls()) #Remove variables from previous runs
+```
+
+```{r}
+#install devtools package
+# if (!requireNamespace("devtools", quietly = TRUE)) {
+# install.packages("devtools")
+# }
+```
+
+```{r}
+# update the cdr3tools package
+# devtools::install_github("caparks2/cdr3tools", force = TRUE)
+# devtools::install_github("tidyverse/tidyverse", force = TRUE)
+```
+
+```{r}
+# install.packages("remotes")
+# remotes::install_github("agentlans/KneeArrower")
+# install.packages("akmedoids")
+# install.packages("vistime")
+# install.packages("ggseqlogo")
+#install.packages("docstring")
+```
+
+```{r}
+# install.packages("lvplot")
+#install.packages('ggbeeswarm')
+
+```
+
+```{r}
+# attach package libraries
+#library(akmedoids)
+library(cdr3tools)
+library(tidyverse)
+library(eulerr)
+library(pheatmap)
+library(factoextra)
+library(KneeArrower)
+library(ggplot2)
+library(gridExtra)
+#library(vistime)
+library(lvplot)
+#library(ggseqlogo)
+library(MGLM) 
+library(readxl)
+# library(Biostrings)
+library(ggpubr)
+library(purrr)
+library(dplyr)
+library(patchwork)
+library(ggbeeswarm)
+library(docstring)
+library(ggalluvial)
+library(plotly)
+library(rstatix)
+library(tidymodels)
+library(cowplot)
+library(ggtext)
+```
+
+```{r}
+# set path to file
+#path ="/Users/lingtingshi/Documents/GVHD_project/Annotated_v4/" 
+path = "/Users/lingtingshi/Documents/Annotated_v4/" 
+setwd(path)
+filenames <-list.files(path) #Get list of all folders of patient data
+print(filenames)
+
+
+```
+
+```{r}
+
+combine_immuno <- function(immdata, sample_meta_data, comb_idx, unique_identifiers){ 
+  #' Combine immunoseq files from teh same timepoint
+  #' 
+  #' @description This function combines n immunoseq 
+  #' files from the same timepoint that are given from Adaptive Imunno Sequencing.
+  #' The file names must be in format PatientID_timepoint_celltype
+  #' 
+  #' @param immdata List of dataframes containing the data from immunoseq files.
+  #' Dataframes are obtained through the function read_immunoseq
+  #' @param sample_meta_data 3 by sample dataframe that contains PatientID in first row,
+  #' timepoint in second row, and cell type in the third row
+  #' @param comb_idx the indices of the samples you would like to combine
+  #' @param unique_identifiers Columns in immdata that identify unique clones (eg. cdr3_amino_acid, v_resolved, j_resolved)
+  #' @usage combine_immuno(immdata, sample_meta_data, comb_idx, unique_identifiers)
+  #' @return updated: list(immdata, sample_meta_data)
+  
+  
+  
+  cd4 <- immdata[[comb_idx[1]]] #initialize dataframe to be combined into
+  cd4$cell_type<- sample_meta_data[3,comb_idx[1]] #set the cell_type of that dataframe
+  for(i in seq(2,length(comb_idx),1)){ #for every other datafram identify by the indices combine into the first dataframe
+    cd <- immdata[[comb_idx[i]]]
+    cd$cell_type <- sample_meta_data[3, comb_idx[i]]
+    cd4 <- dplyr::full_join(cd4,cd, by = c(unique_identifiers, "PatientID", "timepoint"))%>%
+      replace_na(list(frequency.x = 0, frequency.y = 0,templates.x = 0, templates.y = 0, cell_type.x = "", cell_type.y = ""))
+    cd4$templates <- cd4$templates.x+ cd4$templates.y #Add the templates of the same clones together
+    cd4$frequency <- cd4$templates/sum(cd4$templates) #Recalculate the frequency
+    cd4$cell_type <- gsub(" ", "",paste(gsub(" ", "",cd4$cell_type.x), gsub(" ", "", cd4$cell_type.y)))
+    cd4 <- cd4 %>% select(all_of(c(unique_identifiers, "frequency", "templates", "PatientID", "timepoint", "cell_type")))
+    immdata[[comb_idx[1]]] <- cd4
+  }
+  sample_meta_data[3,comb_idx[1]] <- "both" #change the first dataframes description to be both
+  comb_idx <- comb_idx[-1] #remove the first indices from the indices
+  immdata <- immdata[-comb_idx] #remove the dataframes that were combined from immdata
+  sample_meta_data <- sample_meta_data[,-comb_idx] #remove the samples that were combined from sample_meta_data
+  
+  return(list(immdata, sample_meta_data))
+  
+}
+```
+
+```{r}
+determine_cell_type <- function(cell_type.unstim, cell_type.CFSElo){
+  if(cell_type.unstim == "CD4CD8" & cell_type.CFSElo != "CD4CD8"){
+    return (cell_type.CFSElo)
+  } else if(cell_type.CFSElo == "CD4CD8" & cell_type.unstim != "CD4CD8"){
+    return (cell_type.unstim)
+  } else if(cell_type.unstim != "CD4CD8" & cell_type.unstim != "CD4CD8"){
+    if(cell_type.CFSElo == cell_type.unstim)
+    {
+      return(cell_type.CFSElo)
+    } 
+    else
+    {
+      return("CD4CD8")
+    }
+  }
+  
+  return("CD4CD8")
+}
+
+```
+
+```{r}
+
+process_data <- function(filename, path, unique_identifiers = c("cdr3_amino_acid", "v_resolved", "j_resolved")){
+  #' Process patient immunoseq folder
+  #' 
+  #' @description This function takes a patients immunoseq folder and iterates
+  #' through each file extracting the needed information and combining files that 
+  #' are from the same timepoint. Once files are combined alloreactive clones
+  #' are determined and returned.
+  #' 
+  #' @param filename name of patient folder
+  #' @param path to folder that contains all patients
+  #' @param unique_identifiers Columns in immdata that identify unique clones (eg. cdr3_amino_acid, v_resolved, j_resolved)
+  #' @return list(immdata2, sample_meta_data, allo, nonallo)
+  #' 
+
+  # load data
+  print(filename)
+  
+  immdata <- read_immunoseq(paste(path, filename,"/",sep = ""))
+  immdata2 <- lapply(immdata, function(x) {
+  x %>%
+    dplyr::group_by(across(all_of(unique_identifiers))) %>% #Combine any duplicates and drop any unnecessary rows 
+    dplyr::summarise(templates = sum(templates), .groups = "drop") %>%
+    mutate(frequency = templates / sum(templates)) %>%
+    dplyr::arrange(dplyr::desc(frequency))  
+    })
+  
+
+  immdata1 <- map2( #Map PatientID to clones
+    immdata2,
+    data.frame(strsplit(names(immdata), split = "_"))[1,],
+    ~ mutate(.x, PatientID = .y)
+  )
+  immdata2 <- map2( #map time to each sample
+    immdata1,
+    data.frame(strsplit(names(immdata), split = "_"))[2,],
+    ~ mutate(.x, timepoint = .y)
+  )
+  
+  # get metadata
+  sample_names = rownames(summary(immdata))
+  sample_meta_data <-data.frame(strsplit(sample_names, split = "_"))
+  sample_meta_data
+  
+  
+  Treg_idx <- grep('Treg', sample_meta_data[3,]) #Combine Treg
+  if(length(Treg_idx) > 1){
+    result <- combine_immuno(immdata2, sample_meta_data, Treg_idx, unique_identifiers)
+    immdata2 <- result[[1]]
+    sample_meta_data <- result[[2]]
+  }
+  
+  MAX_ITER <-50 #may need to change if you are combining over 50 samples
+  iter <- 0
+  j <- 1
+  while(j <= length(sample_meta_data[2,]) & iter < MAX_ITER){ #Combine and CD4 and CD8 that have the same timepoints
+
+    time_idx <- which(sample_meta_data[2,] == sample_meta_data[2,j])
+    if (length(time_idx) > 1){ #If there is one CD4 or CD8 Change to both
+      result <- combine_immuno(immdata2, sample_meta_data, time_idx, unique_identifiers)
+      immdata2 <- result[[1]]
+      sample_meta_data <- result[[2]]
+      #Ensure Cell type labeling is good
+      # immdata2[[j]] <- immdata2[[j]] %>%
+      #   mutate(cell_type = ifelse(grepl("CD3", cell_type), gsub("CD3 & CD8")))
+      
+    }else{
+      if (sample_meta_data[3,j] != "both") {
+        cd48 <- immdata2[[j]]
+        cd48 <- cd48 %>%
+          subset(select = c(unique_identifiers, "frequency", "templates", "PatientID", "timepoint"))
+        cd48$cell_type <- sample_meta_data[3,j]
+        immdata2[[j]] <- cd48
+        sample_meta_data[3,j] = "both"
+      }else{
+        #print("Already Both")
+        immdata2[[j]]$cell_type = "CD4CD8"
+      }
+    }
+    iter <- iter + 1
+    j <- j + 1
+  }
+  
+  unstim_idx <- which(sample_meta_data[2,] == 'unstimulated')
+  MLRCF_idx <- which(sample_meta_data[2,] == 'MLRCFSElo')
+  
+  allo_inner <- dplyr::inner_join(immdata2[[MLRCF_idx]],immdata2[[unstim_idx]],
+                           by = c(unique_identifiers, "PatientID"), 
+                           suffix = c(".CFSELo", ".unstim")
+  ) %>%
+    replace_na(list(frequency.unstim = 0, frequency.CFSELo = 0)) %>%
+    filter(frequency.CFSELo >= 2 * frequency.unstim)%>%
+    select(unique_identifiers, "frequency.CFSELo", "frequency.unstim", "templates.CFSELo", "templates.unstim", "PatientID", "cell_type.CFSELo")
+  allo_inner['tag'] <- 'inner'
+  colnames(allo_inner)[colnames(allo_inner) == "cell_type.CFSELo"] <- "cell_type"
+  
+  allo_outer <- dplyr::anti_join(immdata2[[MLRCF_idx]],immdata2[[unstim_idx]],
+                          by = c(unique_identifiers), 
+  ) %>%
+    replace_na(list(frequency = 0)) %>%
+    filter(frequency >= 1e-5)%>%
+    select(unique_identifiers, "frequency", "templates", "PatientID", "cell_type")
+  names(allo_outer)[names(allo_outer) == 'frequency'] <- 'frequency.CFSELo'
+  names(allo_outer)[names(allo_outer) == 'templates'] <- 'templates.CFSELo'
+  allo_outer['frequency.unstim'] <- 0
+  allo_outer['templates.unstim'] <- 0
+  allo_outer['tag'] <- 'outer'
+  allo <- bind_rows(allo_inner, allo_outer)
+  
+  nonallo_unstim <- dplyr::anti_join(immdata2[[unstim_idx]], allo, by = c(unique_identifiers))%>%
+    replace_na(list(frequency = 0))%>%
+    select(unique_identifiers, "frequency", "templates", "PatientID", "cell_type")
+
+  nonallo_mlr <- dplyr::anti_join(immdata2[[MLRCF_idx]], allo, by = c(unique_identifiers))%>%
+    replace_na(list(frequency = 0))%>%
+    select(unique_identifiers, "frequency", "templates", "PatientID", "cell_type")
+
+  nonallo <- dplyr::full_join(nonallo_unstim, nonallo_mlr, 
+                              by = c(unique_identifiers, "PatientID"),
+                              suffix = c(".unstim", ".CFSElo"))%>%
+    replace_na(list(frequency.unstim = 0, frequency.CFSElo = 0, 
+                    templates.unstim = 0, templates.CFSElo = 0))%>%
+    mutate(cell_type.unstim = gsub("CD3", "", cell_type.unstim), cell_type.CFSElo = gsub("CD3", "", cell_type.CFSElo))%>%
+    mutate(cell_type.unstim = ifelse(is.na(cell_type.unstim), cell_type.CFSElo, cell_type.unstim), cell_type.CFSElo = ifelse(is.na(cell_type.CFSElo), cell_type.unstim, cell_type.CFSElo))%>%
+    mutate(cell_type.CFSElo = gsub("CD3", "", cell_type.CFSElo ), cell_type.unstim = gsub("CD3","", cell_type.unstim))%>%
+    mutate(cell_type.CFSElo = gsub("both", "CD4CD8", cell_type.CFSElo ), cell_type.unstim = gsub("both","CD4CD8", cell_type.unstim))%>%
+    mutate(cell_type.CFSElo = gsub("tsv", "CD4CD8", cell_type.CFSElo ), cell_type.unstim = gsub("tsv","CD4CD8", cell_type.unstim))%>%
+    mutate(cell_type.CFSElo = ifelse(cell_type.CFSElo == "", "CD4CD8", cell_type.CFSElo), cell_type.unstim = ifelse(cell_type.unstim == "", "CD4CD8", cell_type.unstim))%>%
+    rowwise()%>%
+    mutate(cell_type = determine_cell_type(cell_type.CFSElo, cell_type.unstim))
+  # %>%
+  #   mutate(cell_type = paste(ifelse((cell_type.unstim), "", cell_type.unstim), ifelse(is.na(cell_type.CFSElo), "", cell_type.CFSElo)))%>%
+  #   mutate(cell_type = paste(ifelse(grepl("8",cell_type), "CD8", ""),ifelse(grepl("4",cell_type), "CD4", ""), ifelse(grepl("3",cell_type), "CD3", "") ))#%>%
+  #   #select(all_of(c(unique_identifiers, "cell_type")))
+
+  return(list(immdata2, sample_meta_data, allo, nonallo))
+}
+
+```
+
+Here we are processing the immunoseq files. The process data function: - Combines duplicate clones - Combines timepoints that are split into CD4 and CD8 and recalculates frequencies - Removes tissue timeopints - Determine Alloreactive and Nonalloreactive clones
+
+```{r}
+data <- vector("list", length(filenames))
+data_meta<- vector("list", length(filenames))
+all_allo <- vector("list", length(filenames))
+all_nonallo <- vector("list",  length(filenames))
+unique_identifiers <- c("cdr3_amino_acid", "v_resolved", "j_resolved") #Set to what you want to classify as unique clone
+
+#Read all data and map to corresponding list
+for (file_num in seq(1,length(filenames), 1)) {
+  results <- process_data(filenames[file_num], path, unique_identifiers)
+  data[[file_num]] <- results[[1]]
+  data_meta[[file_num]] <- results[[2]]
+  all_allo[[file_num]] <- results[[3]]
+  all_nonallo[[file_num]] <- results[[4]]
+}
+# nonallo_csv <- bind_rows(all_nonallo)
+# write.csv(nonallo_csv, file = "/Users/pressm/Documents/AziziLab/GVHD/immunoseq_r/nonallo.csv")
+# allo_csv <- bind_rows(all_allo)
+# write.csv(allo_csv, file = "/Users/pressm/Documents/AziziLab/GVHD/immunoseq_r/allo.csv")
+
+
+```
+
+```{r}
+all_full_allo <- vector("list", length(filenames))
+for(i in seq(1,length(data),1)){ #Get list of Allo and Nonallo clones
+  immdata2 <- data[[i]]
+  allo <- all_allo[[i]]
+  nonallo <- all_nonallo[[i]]
+  sample_meta_data <- data_meta[[i]]
+  
+  full_allo_inner <- subset(allo, allo$tag == 'inner')
+  allo_inner <- full_allo_inner%>%
+    subset(select =  unique_identifiers)
+  
+  full_allo_outer <- subset(allo, allo$tag == 'outer')
+  allo_outer <- full_allo_outer%>%
+    subset(select =  unique_identifiers)
+  
+  all_full_allo[[i]] <- bind_rows(full_allo_inner, full_allo_outer)
+}
+```
+
+To asses how clones diversity, we use the repertoire diversity function to calculate diversity at each timepoint.
+```{r}
+#We are calculating the diversity metrics for alloreactive, nonalloreactive and all clones
+data_all <- vector("list", length(filenames))
+data_allo <- vector("list", length(filenames))
+data_allo_w0 <- vector("list", length(filenames)) #Storing when alloreactive clones are 0. Can't calculate diversity metric with 0s.
+data_allo_inner <- vector("list", length(filenames))
+data_allo_outer <- vector("list", length(filenames))
+data_allo_10 <- vector("list", length(filenames))
+data_nonallo <- vector("list", length(filenames))
+all_nonallo_div_CD4 <- vector("list", length(filenames))
+all_nonallo_div_CD8 <- vector("list", length(filenames))
+data_nonallo_w0 <- vector("list", length(filenames)) #Storing when alloreactive clones are 0. Can't calculate diversity metric with 0s.
+all_allo_div <- vector("list", length(filenames))
+all_allo_div_CD4 <- vector("list", length(filenames))
+all_allo_div_CD8 <- vector("list", length(filenames))
+all_allo_inner_div <- vector("list", length(filenames))
+all_allo_outer_div <- vector("list", length(filenames))
+all_nonallo_div <- vector("list", length(filenames))
+all_rep_div <- vector("list", length(filenames))
+
+
+
+for(i in seq(1,length(data),1)){ #iterate through each patient and calculate diveristy metrics
+  immdata2 <- data[[i]]
+  allo <- all_allo[[i]]
+  nonallo <- all_nonallo[[i]]
+  sample_meta_data <- data_meta[[i]]
+  
+  
+  
+  full_allo_inner <- subset(allo, allo$tag == 'inner')
+  allo_inner <- full_allo_inner%>%
+    subset(select =  c(unique_identifiers, "PatientID"))
+  
+  full_allo_outer <- subset(allo, allo$tag == 'outer')
+  allo_outer <- full_allo_outer%>%
+    subset(select =  c(unique_identifiers, "PatientID"))
+  
+  
+  
+  allo <- allo %>% subset(select =  c(unique_identifiers, "cell_type")) # Separate out CD4 and CD8 to calculate metric on each.
+  allo_CD4 <- allo[grepl("4", allo$cell_type) & !grepl("8", allo$cell_type),]
+  allo_CD8 <- allo[grepl("8", allo$cell_type) & !grepl("4", allo$cell_type),]
+  
+  nonallo <- nonallo%>%
+    subset(select =c(unique_identifiers, "cell_type", "PatientID"))
+  nonallo_CD4 <- nonallo[grepl("4", nonallo$cell_type) & !grepl("8", nonallo$cell_type),]
+  nonallo_CD8 <- nonallo[grepl("8", nonallo$cell_type) & !grepl("4", nonallo$cell_type),]
+  
+  all <- bind_rows(allo, nonallo)
+  immdata_all <- lapply(immdata2, function(x){
+    x%>%
+      dplyr::inner_join(all, by = unique_identifiers)%>%
+      mutate(cell_type = cell_type.y)%>%
+      subset(select = -c(cell_type.x, cell_type.y))
+  })
+  
+  all_rep_div[[i]] <-repertoire_diversity(immdata_all)
+  
+  immdata_alloreactives <- lapply(immdata2, function(x) {
+      x%>%
+      dplyr::inner_join(allo, by =  unique_identifiers)%>%
+      mutate(cell_type = cell_type.y)%>%
+      subset(select = -c(cell_type.x, cell_type.y))
+  })
+  
+  immdata_alloreactives_w0 <- lapply(immdata2, function(x) {
+      curr_timepoint <- unique(x$timepoint)
+      x%>%
+      dplyr::right_join(allo, by =  unique_identifiers)%>%
+      mutate(cell_type = ifelse(is.na(cell_type.y), "CD4 CD8", cell_type.y),
+             templates = ifelse(is.na(templates), 0, templates),
+             frequency = ifelse(is.na(frequency), 0, frequency),
+             PatientID = sample_meta_data[1,1],
+             timepoint = curr_timepoint)%>%
+      subset(select = -c(cell_type.x, cell_type.y))
+  })
+  
+  immdata_alloreactives_CD4 <- lapply(immdata2, function(x) {
+      x%>%
+      dplyr::inner_join(allo_CD4, by =  unique_identifiers)%>%
+      mutate(cell_type = cell_type.y)%>%
+      subset(select = -c(cell_type.x, cell_type.y))
+  })
+  immdata_alloreactives_CD8 <- lapply(immdata2, function(x) {
+      x%>%
+      dplyr::inner_join(allo_CD8, by =  unique_identifiers)%>%
+      mutate(cell_type = cell_type.y)%>%
+      subset(select = -c(cell_type.x, cell_type.y))
+  })
+
+  all_allo_div[[i]] <-repertoire_diversity(immdata_alloreactives)
+  all_allo_div_CD4[[i]] <-repertoire_diversity(immdata_alloreactives_CD4)
+  all_allo_div_CD8[[i]] <-repertoire_diversity(immdata_alloreactives_CD8)
+  
+  
+  #List of alloreactives
+  immdata_alloreactives_inner <- lapply(immdata2, function(x) {
+    x <- dplyr::inner_join(allo_inner, x, by =  unique_identifiers)
+  })
+  
+  
+  # repertoire diversity of allo-reactives
+  all_allo_inner_div[[i]] <-repertoire_diversity(immdata_alloreactives_inner)
+  
+  #List of alloreactives
+  immdata_alloreactives_outer <- lapply(immdata2, function(x) {
+    x <- dplyr::inner_join(allo_outer, x, by =  unique_identifiers)
+  })
+  
+  # repertoire diversity of allo-reactives
+  all_allo_outer_div[[i]] <-repertoire_diversity(immdata_alloreactives_outer)
+  
+  
+  
+  # List of non-alloreactives
+  immdata_nonalloreactives <- lapply(immdata2, function(x) {
+    x %>% 
+      dplyr::inner_join(nonallo, by =  unique_identifiers)%>%
+      mutate(cell_type = cell_type.y)%>%
+      subset(select = -c(cell_type.x, cell_type.y))
+  })
+  
+  immdata_nonalloreactives_CD4 <- lapply(immdata2, function(x) {
+      x%>%
+      dplyr::inner_join(nonallo_CD4, by =  unique_identifiers)%>%
+      mutate(cell_type = cell_type.y)%>%
+      subset(select = -c(cell_type.x, cell_type.y))
+  })
+  immdata_nonalloreactives_CD8 <- lapply(immdata2, function(x) {
+      x%>%
+      dplyr::inner_join(nonallo_CD8, by =  unique_identifiers)%>%
+      mutate(cell_type = cell_type.y)%>%
+      subset(select = -c(cell_type.x, cell_type.y))
+  })
+  
+  immdata_nonalloreactives_w0 <- lapply(seq_along(immdata2), function(x) {
+      immdata2[[x]]%>%
+      dplyr::right_join(nonallo, by =  c(unique_identifiers, "PatientID"))%>%
+      mutate(cell_type = cell_type.y,
+             templates = ifelse(is.na(templates), 0, templates),
+             frequency = ifelse(is.na(frequency), 0, frequency),
+             PatientID = strsplit(names(immdata2)[x], "_")[[1]][1],
+             timepoint = strsplit(names(immdata2)[x], "_")[[1]][2])%>%
+      subset(select = -c(cell_type.x, cell_type.y))
+  })
+  names(immdata_nonalloreactives_w0) = names(immdata2)
+  
+  # repertoire diversity of non-allo-reactives
+  all_nonallo_div[[i]]<-repertoire_diversity(immdata_nonalloreactives)
+  all_nonallo_div_CD4[[i]]<-repertoire_diversity(immdata_nonalloreactives_CD4)
+  all_nonallo_div_CD8[[i]]<-repertoire_diversity(immdata_nonalloreactives_CD8)
+  
+  # List of top 10 non-alloreactives
+  immdata_nonalloreactives_top10 <- lapply(immdata2, function(x) {
+    x %>% 
+      dplyr::anti_join(allo, by =  unique_identifiers) %>% 
+      arrange(desc(frequency)) %>% 
+      slice_head(n = 10)
+  })
+  
+  # List of top 10 alloreactives
+  immdata_alloreactives_top10 <- lapply(immdata2, function(x) {
+    x %>% 
+      dplyr::inner_join(allo, by =  unique_identifiers) %>%
+      arrange(desc(frequency)) %>% 
+      slice_head(n = 10)
+  })
+  data_all[[i]] <- immdata_all
+  data_nonallo[[i]] <- immdata_nonalloreactives
+  data_nonallo_w0[[i]] <- immdata_nonalloreactives_w0
+  data_allo[[i]] <- immdata_alloreactives
+  data_allo_w0[[i]] <- immdata_alloreactives_w0
+  data_allo_inner[[i]] <- immdata_alloreactives_inner
+  data_allo_outer[[i]] <- immdata_alloreactives_outer
+  data_allo_10[[i]]<- immdata_alloreactives_top10
+}
+```
+
+```{r}
+meta_data <- read_excel("/Users/lingtingshi/Documents/GVHD_project/From_Michael/TCR_Project.xlsx", sheet = 'Patient Metadata')%>%
+  mutate(PatientID = gsub("[^0-9.-]", "R", PatientID), PTCy = ifelse(grepl("PTCy", PTCy), "PTCy", "No PTCy"))
+
+# meta_data <- read_excel("/Users/pressm/Documents/AziziLab/GVHD/immunoseq_r/TCR_Project.xlsx", sheet = 'Patient Metadata')
+meta_data <- meta_data[1:29, ]
+meta_data$PatientID <- paste("R", sprintf("%03d", as.integer(substring(meta_data$PatientID, 2))), sep = "")
+
+```
+
+
+```{r}
+full_allo_input <- all_full_allo #determine the expanded clones
+elbow <- vector("list", length(filenames))
+expanded_clones <- vector("list", length(filenames))
+for(i in seq(1,length(data),1)){
+  full_allo <- full_allo_input[[i]]
+  allo_cd48 = full_allo
+  
+  sorted_CD48_allo <-allo_cd48[order(-allo_cd48$frequency.CFSELo),] 
+  simple_cutoff <- data.frame(findCutoff(as.numeric(rownames(sorted_CD48_allo)), sorted_CD48_allo$frequency.CFSELo))
+  lo <- loess(sorted_CD48_allo$frequency.CFSELo~as.numeric(rownames(sorted_CD48_allo)), span = 0.4, degree = 1)
+  line_data <- data.frame(y = predict(lo), x = seq_along(predict(lo)))
+  lo_cutoff <- data.frame(findCutoff(as.numeric(rownames(sorted_CD48_allo)), predict(lo,as.numeric(rownames(sorted_CD48_allo))), method = "curvature"))
+  
+  expanded_plot <- ggplot(sorted_CD48_allo, aes(x = seq_along(frequency.CFSELo), y = frequency.CFSELo))+
+    geom_point()+
+    geom_line(data = line_data, color = "red", size = 1, aes(x = x, y = y))+
+    geom_point(data = simple_cutoff, color = "black", size = 2, aes(x = x, y = y))+
+    geom_point(data = lo_cutoff, color = "red", size = 2, aes(x = x, y = y))+
+    theme_pubr()+
+    labs(title = filenames[i])
+  # plot(as.numeric(rownames(sorted_CD48_allo)), sorted_CD48_allo$frequency.CFSELo, main = filenames[i])
+
+  plot(expanded_plot)
+  
+  ggsave(filename = paste0("/Users/lingtingshi/Documents/GVHD_project/From_Michael/MLR_Pipeline/Main_fig//expanded_plot_", filenames[i], ".png"), 
+         plot = expanded_plot, width = 4, height = 3, units = "in", dpi = 300)
+  ggsave(filename = paste0("/Users/lingtingshi/Documents/GVHD_project/From_Michael/MLR_Pipeline/Main_fig//expanded_plot_", filenames[i], ".pdf"), 
+         plot = expanded_plot, width = 4, height = 3, units = "in", dpi = 300)
+
+  
+  
+  elbow[[i]] <-findCutoff(as.numeric(rownames(sorted_CD48_allo)), predict(lo,as.numeric(rownames(sorted_CD48_allo))),  method = "curvature")
+  top_allo_48 <-allo_cd48[allo_cd48$frequency.CFSELo >= elbow[[i]]$y,]
+  expanded_clones[[i]] <- top_allo_48
+  
+
+}
+
+```
+```{r}
+# Function to count unique MLRCFSElo tags by patient ID
+count_unique_tags_by_patient <- function(data_allo) {
+  # Create a data frame to store results
+  results <- data.frame(
+    patient_id = character(),
+    num_unique_tags = integer(),
+    stringsAsFactors = FALSE
+  )
+  
+  # Loop through each element in data_allo
+  for (i in seq_along(data_allo)) {
+    # Get all names at this level that end with "_MLRCFSElo_both"
+    mlrcfselo_names <- grep("MLRCFSElo", names(data_allo[[i]]), value = TRUE)
+    
+    for (mlrcfselo_name in mlrcfselo_names) {
+      # Extract patient ID from the name (assuming format like "R051_MLRCFSElo_both")
+      patient_id <- sub("^([^_]+)_.*$", "\\1", mlrcfselo_name)
+      
+      # Get the data
+      mlrcfselo_data <- data_allo[[i]][[mlrcfselo_name]]
+      
+      # Count unique tags based on data type
+      num_unique <- 0
+      if (is.data.frame(mlrcfselo_data) || is.matrix(mlrcfselo_data)) {
+        # For tibbles/data frames, look for tag columns
+        if ("tag" %in% colnames(mlrcfselo_data)) {
+          num_unique <- length(unique(mlrcfselo_data$tag))
+        } else {
+          # If no obvious tag column, count rows as a fallback
+          num_unique <- nrow(mlrcfselo_data)
+        }
+      } else if (is.vector(mlrcfselo_data)) {
+        # For vectors, count unique elements
+        num_unique <- length(unique(mlrcfselo_data))
+      }
+      
+      # Add to results
+      results <- rbind(results, data.frame(
+        patient_id = patient_id,
+        num_unique_tags = num_unique,
+        stringsAsFactors = FALSE
+      ))
+    }
+  }
+  
+  # Aggregate by patient_id (in case the same patient appears multiple times)
+  if (nrow(results) > 0) {
+    agg_results <- aggregate(num_unique_tags ~ patient_id, data = results, FUN = sum)
+    return(agg_results)
+  } else {
+    return(results)
+  }
+}
+
+# Run the function
+patient_tag_counts <- count_unique_tags_by_patient(data_allo)
+
+# Define the custom order with R prefix and 3-digit format
+custom_order <- c("R051", "R066", "R067", "R068", "R069", "R070", "R076", "R081", "R086", 
+                  "R090", "R093", "R101", "R143", "R137", "R150", "R153", "R091", 
+                  "R098", "R160", "R179")
+
+# Create a factor with the custom order
+patient_tag_counts$patient_id <- factor(patient_tag_counts$patient_id, 
+                                        levels = custom_order)
+
+# Sort the data frame by the factor
+ordered_counts <- patient_tag_counts[order(patient_tag_counts$patient_id), ]
+
+# Print results in requested order
+print(ordered_counts)
+
+# Create a bar plot of the results in the custom order
+if (requireNamespace("ggplot2", quietly = TRUE)) {
+  library(ggplot2)
+  ggplot(ordered_counts, aes(x = patient_id, y = num_unique_tags)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    labs(title = "Number of Unique Tags by Patient ID",
+         x = "Patient ID",
+         y = "Number of Unique Tags") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+```
+
+
+```{r}
+# Function to sum template values by patient ID
+sum_template_by_patient <- function(data_all) {
+  # Create a data frame to store results
+  results <- data.frame(
+    patient_id = character(),
+    sum_template = numeric(),
+    stringsAsFactors = FALSE
+  )
+  
+  # Loop through each element in data_allo
+  for (i in seq_along(data_allo)) {
+    # Get all names at this level that end with "_MLRCFSElo_both"
+    mlrcfselo_names <- grep("MLRCFSElo", names(data_allo[[i]]), value = TRUE)
+    
+    for (mlrcfselo_name in mlrcfselo_names) {
+      # Extract patient ID from the name (assuming format like "R051_MLRCFSElo_both")
+      patient_id <- sub("^([^_]+)_.*$", "\\1", mlrcfselo_name)
+      
+      # Get the data
+      mlrcfselo_data <- data_allo[[i]][[mlrcfselo_name]]
+      
+      # Sum template values based on data type
+      template_sum <- 0
+      if (is.data.frame(mlrcfselo_data) || is.matrix(mlrcfselo_data)) {
+        # For tibbles/data frames, look for template column
+        if ("templates" %in% colnames(mlrcfselo_data)) {
+          # Sum the template column, handling NA values
+          template_sum <- sum(mlrcfselo_data$templates, na.rm = TRUE)
+        }
+      } 
+      
+      # Add to results
+      results <- rbind(results, data.frame(
+        patient_id = patient_id,
+        sum_template = template_sum,
+        stringsAsFactors = FALSE
+      ))
+    }
+  }
+  
+  # Aggregate by patient_id (in case the same patient appears multiple times)
+  if (nrow(results) > 0) {
+    agg_results <- aggregate(sum_template ~ patient_id, data = results, FUN = sum)
+    return(agg_results)
+  } else {
+    return(results)
+  }
+}
+
+# Run the function
+patient_template_sums <- sum_template_by_patient(data_allo)
+
+# Define the custom order with R prefix and 3-digit format
+custom_order <- c("R051", "R066", "R067", "R068", "R069", "R070", "R076", "R081", "R086", 
+                  "R090", "R093", "R101", "R143", "R137", "R150", "R153", "R091", 
+                  "R098", "R160", "R179")
+
+# Create a factor with the custom order
+patient_template_sums$patient_id <- factor(patient_template_sums$patient_id, 
+                                        levels = custom_order)
+
+# Sort the data frame by the factor
+ordered_sums <- patient_template_sums[order(patient_template_sums$patient_id), ]
+
+# Print results in requested order
+print(ordered_sums)
+
+# Create a bar plot of the results in the custom order
+if (requireNamespace("ggplot2", quietly = TRUE)) {
+  library(ggplot2)
+  ggplot(ordered_sums, aes(x = patient_id, y = sum_template)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    labs(title = "Sum of Template Values by Patient ID",
+         x = "Patient ID",
+         y = "Sum of Template Values") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+```
+
+```{r}
+# Assuming "template" is a specific column in each tibble:
+sum_templates <- 0
+
+# Loop through all tibbles in data_all[[1]]
+for(i in 1:length(data_all[[1]])) {
+  # Check if the current item is a tibble/data frame
+  if(is.data.frame(data_all[[1]][[i]])) {
+    # Check if the tibble has a column called "template" (or whatever your column name is)
+    if("templates" %in% colnames(data_all[[1]][[i]])) {
+      # Sum the values in the "template" column and add to our running total
+      sum_templates <- sum_templates + sum(data_all[[1]][[i]]$templates, na.rm = TRUE)
+    }
+  }
+}
+
+# Print the result
+print(sum_templates)
+```
+
+
+```{r}
+
+# add cdr3vj 
+data_allo <- map(data_allo, function(list1) {
+  map(list1, ~ mutate(.x, tag = paste(cdr3_amino_acid, v_resolved, j_resolved, sep = " ")))
+})
+
+data_allo_w0 <- map(data_allo_w0, function(list1) {
+  map(list1, ~ mutate(.x, tag = paste(cdr3_amino_acid, v_resolved, j_resolved, sep = " ")))
+})
+
+expanded_clones <- map(expanded_clones, ~ mutate(.x, tag = paste(cdr3_amino_acid, v_resolved, j_resolved, sep = " ")))
+```
+
+```{r}
+# map data_allo with expanded_clones
+for (i in 1:length(data_allo)) {
+  for (j in 1:length(data_allo[[i]])) {
+    data_allo[[i]][[j]] <- data_allo[[i]][[j]] %>%
+      mutate(ifexpanded = ifelse(tag %in% expanded_clones[[i]]$tag, TRUE, FALSE))
+  }
+}
+
+for (i in 1:length(data_allo_w0)) {
+  for (j in 1:length(data_allo_w0[[i]])) {
+    data_allo_w0[[i]][[j]] <- data_allo_w0[[i]][[j]] %>%
+      mutate(ifexpanded = ifelse(tag %in% expanded_clones[[i]]$tag, TRUE, FALSE))
+  }
+}
+```
+
+
+```{r}
+cd48_allo <- vector("list", length(filenames))
+
+for (file_num in seq_along(filenames)) {
+  cd48_allo[[file_num]] <- vector("list", length(data_allo_w0[[file_num]]))
+  
+  for (i in seq_along(data_allo_w0[[file_num]])) {
+    cd48_allo[[file_num]][[i]] <- data_allo_w0[[file_num]][[i]] %>%
+      mutate(ifexpanded = as.character(ifexpanded))
+  }
+}
+
+data_CD48_all <- bind_rows(do.call("c", cd48_allo))
+data_CD48_all <- dplyr::full_join(data_CD48_all, meta_data, by = 'PatientID')
+data_CD48_all_expand <- data_CD48_all[data_CD48_all$ifexpanded==TRUE,]
+data_CD48_all_expand <- data_CD48_all_expand[!is.na(data_CD48_all_expand$cdr3_amino_acid),]
+
+data_CD48_all <- data_CD48_all
+
+data_CD48_all_expand <- data_CD48_all_expand
+```
+
+```{r}
+clinical_data <- read_excel("/Users/lingtingshi/Documents/TCR_Project.xlsx", sheet = "Patient Metadata cont.")
+clinical_data <- clinical_data[c('PatientID', 'Age_R', 'HLA_mis', 'DLI_PTD', 'Relapse', 'Off Immunosuppresion', 'GVHD_DX_Post_Transplant', 'GVHD Max Grade Post Transplant', 'EBV +', 'HHV6 +', 'Systemic_Steroids', 'CMV +', "Chronic")]
+
+clinical_data$PatientID <- as.character(clinical_data$PatientID)
+# clinical_data$PatientID <- paste("R", sprintf("%03d", as.integer(clinical_data$PatientID)), sep = "")
+meta_data_clin <- dplyr::full_join(meta_data, clinical_data, by = "PatientID")%>%
+  filter(!is.na(DonorType))
+```
+```{r}
+# Simple code to get clone counts (number of rows, not columns)
+
+# Your target strings
+strings <- c("Colon", "GVHD", "UpperGI", "Duodenum", "LowerGI", "GastricBody", "Esophagus")
+
+# Get all patient names from all elements
+all_names <- c()
+element_index <- c()
+
+for(i in 1:length(data_allo)) {
+  patient_names <- names(data_allo[[i]])
+  all_names <- c(all_names, patient_names)
+  element_index <- c(element_index, rep(i, length(patient_names)))
+}
+
+# Find matching patients
+pattern <- paste(strings, collapse = "|")
+matches <- grepl(pattern, all_names, ignore.case = TRUE)
+matching_names <- all_names[matches]
+matching_indices <- element_index[matches]
+
+# Get clone counts (number of ROWS, not columns)
+results <- data.frame(patient = character(), clones = numeric())
+
+for(j in 1:length(matching_names)) {
+  name <- matching_names[j]
+  i <- matching_indices[j]
+  
+  # Get the patient data
+  patient_data <- data_allo[[i]][[name]]
+  
+  # Count clones - use NROW to get the first dimension (rows)
+  if(is.matrix(patient_data) || is.data.frame(patient_data)) {
+    clone_count <- nrow(patient_data)  # This should give you 2, not 10
+  } else if(is.list(patient_data)) {
+    clone_count <- length(patient_data)
+  } else {
+    clone_count <- length(patient_data)
+  }
+  
+  results <- rbind(results, data.frame(patient = name, clones = clone_count))
+}
+
+print("Individual clone counts (number of rows):")
+print(results)
+sum(results$clones)
+
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# Your target strings for anatomical sites
+strings <- c("Colon", "GVHD", "UpperGI", "Duodenum", "LowerGI", "GastricBody", "Esophagus")
+
+# Get all patient names and their data
+all_names <- c()
+element_index <- c()
+
+for(i in 1:length(data_allo)) {
+  patient_names <- names(data_allo[[i]])
+  all_names <- c(all_names, patient_names)
+  element_index <- c(element_index, rep(i, length(patient_names)))
+}
+
+# STEP 1: Find clones from anatomical sites ONLY
+pattern <- paste(strings, collapse = "|")
+matches <- grepl(pattern, all_names, ignore.case = TRUE)
+anatomical_names <- all_names[matches]
+anatomical_indices <- element_index[matches]
+
+# Get clones from anatomical sites
+anatomical_clones_list <- list()
+
+for(j in 1:length(anatomical_names)) {
+  name <- anatomical_names[j]
+  i <- anatomical_indices[j]
+  
+  patient_data <- data_allo[[i]][[name]]
+  
+  if(is.data.frame(patient_data) && nrow(patient_data) > 0) {
+    patient_data <- as.data.frame(patient_data)
+    patient_data$sample_name <- name
+    patient_data$base_patient <- sapply(strsplit(name, "_"), function(x) x[1])
+    anatomical_clones_list[[j]] <- patient_data
+  }
+}
+
+anatomical_clones <- bind_rows(anatomical_clones_list)
+
+print(paste("Total clones from anatomical sites:", nrow(anatomical_clones)))
+print(paste("Unique clones (tags):", length(unique(anatomical_clones$tag))))
+
+# Get unique clone tags and their patients
+anatomical_clone_tags <- unique(anatomical_clones[, c("base_patient", "tag")])
+
+# STEP 2: Search for these clones in ALL other timepoints
+print("\n=== Searching for anatomical site clones in all timepoints ===\n")
+
+all_timepoint_list <- list()
+counter <- 1
+
+for(patient_id in unique(anatomical_clone_tags$base_patient)) {
+  cat("\nPatient:", patient_id, "\n")
+  
+  # Get clones from this patient's anatomical sites
+  patient_anatomical_tags <- anatomical_clone_tags$tag[anatomical_clone_tags$base_patient == patient_id]
+  cat("Clones from anatomical sites:", length(patient_anatomical_tags), "\n")
+  
+  # Find ALL samples for this patient
+  patient_samples <- grep(paste0("^", patient_id, "_"), all_names, value = TRUE)
+  patient_sample_indices <- element_index[grep(paste0("^", patient_id, "_"), all_names)]
+  
+  cat("All samples for this patient:", length(patient_samples), "\n")
+  print(patient_samples)
+  
+  # Look through all samples for this patient
+  for(k in 1:length(patient_samples)) {
+    sample_name <- patient_samples[k]
+    idx <- patient_sample_indices[k]
+    
+    sample_data <- data_allo[[idx]][[sample_name]]
+    
+    if(is.data.frame(sample_data) && nrow(sample_data) > 0) {
+      # Filter for only the anatomical site clones
+      matching_clones <- sample_data[sample_data$tag %in% patient_anatomical_tags, ]
+      
+      if(nrow(matching_clones) > 0) {
+        matching_clones <- as.data.frame(matching_clones)
+        matching_clones$sample_name <- sample_name
+        matching_clones$base_patient <- patient_id
+        all_timepoint_list[[counter]] <- matching_clones
+        counter <- counter + 1
+      }
+    }
+  }
+}
+
+all_timepoint_data <- bind_rows(all_timepoint_list)
+
+print(paste("\nTotal occurrences of anatomical site clones across all timepoints:", nrow(all_timepoint_data)))
+
+# STEP 3: Create comparison table AND plots for EACH patient
+for(patient in unique(all_timepoint_data$base_patient)) {
+  cat("\n\n========== Patient:", patient, "==========\n")
+  
+  patient_data <- all_timepoint_data[all_timepoint_data$base_patient == patient, ]
+  
+  # Show samples
+  samples <- unique(patient_data$sample_name)
+  cat("Samples with anatomical site clones:", length(samples), "\n")
+  print(samples)
+  
+  # Create wide format
+  clone_tracking <- patient_data %>%
+    select(tag, sample_name, frequency) %>%
+    pivot_wider(
+      names_from = sample_name,
+      values_from = frequency,
+      values_fill = 0
+    )
+  
+  print("\nClone frequencies across timepoints:")
+  print(clone_tracking)
+  
+  # Convert to long format for plotting
+  plot_data <- clone_tracking %>%
+    pivot_longer(
+      cols = -tag,
+      names_to = "sample",
+      values_to = "frequency"
+    )
+  
+  # Extract numeric timepoint for ordering
+  plot_data$timepoint_num <- as.numeric(gsub("[^0-9]", "", plot_data$sample))
+  
+  # Order samples by timepoint
+  plot_data <- plot_data %>%
+    arrange(timepoint_num) %>%
+    mutate(sample = factor(sample, levels = unique(sample)))
+  
+  # Create line plot connecting clones
+  p <- ggplot(plot_data, aes(x = sample, y = frequency, color = tag, group = tag)) +
+    geom_line(size = 1.2) +
+    geom_point(size = 3) +
+    scale_y_log10() +
+    labs(
+      title = paste("Clone Frequency Trajectories -", patient),
+      subtitle = "Lines connect same clones across samples",
+      x = "Sample",
+      y = "Frequency (log scale)",
+      color = "Clone Tag"
+    ) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+      legend.position = "right",
+      legend.text = element_text(size = 8),
+      plot.title = element_text(face = "bold", size = 14)
+    )
+  
+  print(p)
+  
+  # Calculate how many timepoints each clone appears in
+  sample_cols <- setdiff(colnames(clone_tracking), "tag")
+  clone_tracking$num_samples <- rowSums(clone_tracking[, sample_cols] > 0)
+  clone_tracking$max_freq <- apply(as.matrix(clone_tracking[, sample_cols]), 1, max)
+  clone_tracking$min_freq <- apply(as.matrix(clone_tracking[, sample_cols]), 1, function(x) min(x[x > 0]))
+  
+  # Show persistent clones
+  persistent <- clone_tracking[clone_tracking$num_samples > 1, ]
+  cat("\nPersistent clones (found in multiple timepoints):", nrow(persistent), "\n")
+  if(nrow(persistent) > 0) {
+    print(persistent[order(-persistent$num_samples, -persistent$max_freq), ])
+  }
+  
+  # Show clones only in anatomical sites
+  anatomical_only <- clone_tracking[clone_tracking$num_samples == 1, ]
+  cat("\nClones only in anatomical sites (not in other timepoints):", nrow(anatomical_only), "\n")
+}
+
+# Summary
+summary_by_patient <- all_timepoint_data %>%
+  group_by(base_patient, tag) %>%
+  summarise(
+    samples = paste(sample_name, collapse = " | "),
+    num_appearances = n(),
+    freq_min = min(frequency),
+    freq_max = max(frequency),
+    freq_change = max(frequency) - min(frequency),
+    .groups = "drop"
+  ) %>%
+  arrange(base_patient, desc(num_appearances), desc(freq_max))
+
+print("\n\n=== SUMMARY: Anatomical site clones across all timepoints ===")
+print(summary_by_patient)
+
+
+```
+```{r}
+clone_tracking
+```
+
+```{r}
+# See how many times each clone appears in anatomical sites
+clone_frequency <- anatomical_clones %>%
+  group_by(tag) %>%
+  summarise(
+    n_appearances = n(),
+    samples = paste(unique(sample_name), collapse = ", ")
+  ) %>%
+  arrange(desc(n_appearances))
+
+print("Clone appearances in anatomical sites:")
+print(clone_frequency)
+
+# Find clones that appear in multiple anatomical samples
+duplicated_clones <- clone_frequency %>%
+  filter(n_appearances > 1)
+
+print("Clones appearing in multiple anatomical site samples:")
+print(duplicated_clones)
+```
+
+```{r}
+# Calculate total clone frequency per tissue/anatomical site
+
+# Extract tissue type from sample names
+anatomical_clones$tissue <- sapply(strsplit(anatomical_clones$sample_name, "_"), function(x) {
+  # Get the part that contains the tissue name (after patient ID and number)
+  parts <- x[-1]  # Remove patient ID
+  tissue_part <- parts[length(parts) - 1]  # Usually second to last
+  return(tissue_part)
+})
+
+# Sum frequencies by tissue
+tissue_summary <- anatomical_clones %>%
+  group_by(tissue) %>%
+  summarise(
+    total_frequency = sum(frequency),
+    n_clones = n(),
+    unique_clones = n_distinct(tag),
+    samples = paste(unique(sample_name), collapse = ", ")
+  ) %>%
+  arrange(desc(total_frequency))
+
+print("Total clone frequency per tissue:")
+print(tissue_summary)
+
+# Visualize
+library(ggplot2)
+
+p_tissue <- ggplot(tissue_summary, aes(x = reorder(tissue, total_frequency), y = total_frequency)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Total Clone Frequency by Tissue",
+    x = "Tissue",
+    y = "Total Frequency",
+    subtitle = paste("Total clones:", sum(tissue_summary$n_clones))
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14)
+  )
+
+print(p_tissue)
+
+# Alternative: Show frequency per tissue per patient
+tissue_patient_summary <- anatomical_clones %>%
+  group_by(base_patient, tissue) %>%
+  summarise(
+    total_frequency = sum(frequency),
+    n_clones = n(),
+    unique_clones = n_distinct(tag),
+    .groups = "drop"
+  ) %>%
+  arrange(base_patient, desc(total_frequency))
+
+print("Clone frequency per tissue per patient:")
+print(tissue_patient_summary)
+
+# Visualize by patient
+p_tissue_patient <- ggplot(tissue_patient_summary, 
+                            aes(x = tissue, y = total_frequency, fill = base_patient)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    title = "Total Clone Frequency by Tissue and Patient",
+    x = "Tissue",
+    y = "Total Frequency",
+    fill = "Patient"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(face = "bold", size = 14)
+  )
+
+print(p_tissue_patient)
+```
+```{r}
+mean(tissue_patient_summary$total_frequency)
+```
+
