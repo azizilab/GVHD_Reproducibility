@@ -13,6 +13,156 @@ We performed mixed lymphocyte reactions (MLRs) combined with high-throughput TCR
 We profiled immune cells in gut biopsies from 14 GVHD patients and two normal donors using paired single-cell transcriptomics and TCR sequencing.
 We further examined spatial transcriptomics data to elucidate the tissue architecture and cell-cell interactions underlying GvHD.
 
+Figures
+
+The table below maps each published figure to the notebook(s)/script(s) that generate it, following the layout used in [decipher_reproducibility](https://github.com/azizilab/decipher_reproducibility). Paths are relative to this repository's root. `MLR_Pipelines/README.md` and `DecipherTCR/README.md` contain additional per-panel detail for their pipelines.
+
+> **Note on figure numbering:** a few notebooks contain leftover code comments referencing figure numbers that no longer match the published manuscript (e.g. `# Figure 4a`/`4B`/`4C`/`4F`/`4G` in `Sc&TCR_Pipelines/4.`, `6.`, `7.`; `# Figure 6A`/`Figure 7A` in the two `StarfyshHD` Starfysh notebooks; "supplementary figure 22" in `StarfyshHD/CellphoneDB_Analysis.ipynb`), which is one ahead of, or otherwise diverged from, the final published numbering — most likely from a mid-revision figure reorder. The mapping below follows the **published** figure numbers, verified against the specific genes, sample sizes, and statistical tests named in each caption rather than the in-code labels.
+
+## Figure 1
+- MLR_Pipelines/notebooks/01_patient_figures_and_diversity.Rmd (b)
+- MLR_Pipelines/notebooks/02_clone_analysis_corrected_fig1C.Rmd (c)
+- MLR_Pipelines/notebooks/04_cumulative_figures_corrected.Rmd (d)
+- MLR_Pipelines/notebooks/03_grade_ptcy_analysis_corrected.Rmd (e–g)
+
+## Figure 2
+- DecompTCR/pipelines/basis_decomposition_generate.ipynb (a)
+- DecompTCR/pipelines/basis_decomposition_final.ipynb (b)
+- MLR_Pipelines/MLR_rcode_work_for_all_sample_combined_final_ptcy_github.Rmd (c–e)
+- MLR_Pipelines/notebooks/05_figure3_annotation_variants.Rmd (f–h)
+
+## Figure 3
+- Sc&TCR_Pipelines/4. after annotation analysis.ipynb (a)
+- Sc&TCR_Pipelines/6. T_cell_pipline_T_cell_subsets_signatures.ipynb (b, c, f)
+- Sc&TCR_Pipelines/7. T_cell_pipline_proportion_analysis.ipynb (d, g, h)
+- Sc&TCR_Pipelines/10.Donor_recipient_by_cell_type_freemuxlet.ipynb (e)
+
+## Figure 4
+- Sc&TCR_Pipelines/11.Migration_analysis.ipynb (a–f)
+- DecipherTCR/2. decipher_ananlysis_GVHD_main_Tcells_CD8_conv_deg_4cluster_clean_with_figures_mobile_balanced.ipynb (g–i)
+
+`DecipherTCR/1. decipher_ananlysis_GVHD_all_Tcells_all_genes_final.ipynb` is a prerequisite step (loads the raw AnnData and runs Decipher training) for notebook 2 above; it contains no `savefig` calls itself and does not directly produce any panel.
+
+## Figure 5
+- StarfyshHD/starfysh_ST_celltype_proportion_with_figures_clean.ipynb (a–c)
+- StarfyshHD/starfysh_ST_distance_analysis.ipynb (a, d–f)
+
+## Figure 6
+- StarfyshHD/starfysh_ST_distance_analysis.ipynb (a, b)
+
+Panel c is a non-code schematic (credit: SciStories).
+
+## Supplementary Figure 1
+- MLR_Pipelines/notebooks/01_patient_figures_and_diversity.Rmd
+
+## Supplementary Figure 2
+- MLR_Pipelines/notebooks/04_cumulative_figures_corrected.Rmd
+
+## Supplementary Figure 3
+- MLR_Pipelines/notebooks/02_clone_analysis_corrected_fig1C.Rmd
+
+## Supplementary Figure 4
+- MLR_Pipelines/notebooks/02_clone_analysis_corrected_fig1C.Rmd
+- MLR_Pipelines/notebooks/03_grade_ptcy_analysis_corrected.Rmd
+
+## Supplementary Figure 5
+- DecompTCR/pipelines/basis_decomposition_generate.ipynb
+
+## Supplementary Figure 6
+- DecompTCR/pipelines/basis_decomposition_final.ipynb (a, b)
+- DecompTCR/pipelines/tcrdist.ipynb (c)
+- MLR_Pipelines/Basis_Hydrophobicity_CDR3Length_Figures.Rmd (d, e)
+
+## Supplementary Figure 7
+- DecompTCR/pipelines/basis_decomposition_final.ipynb
+
+## Supplementary Figure 8
+- MLR_Pipelines/MLR_rcode_work_for_all_sample_combined_final_ptcy_github.Rmd (a)
+- MLR_Pipelines/notebooks/03_grade_ptcy_analysis_corrected.Rmd (b–f)
+
+## Supplementary Figure 9
+- MLR_Pipelines/notebooks/02_clone_analysis_corrected_fig1C.Rmd
+- MLR_Pipelines/notebooks/03_grade_ptcy_analysis_corrected.Rmd
+
+## Supplementary Figure 10
+- Sc&TCR_Pipelines/4. after annotation analysis.ipynb
+
+## Supplementary Figure 11
+- Sc&TCR_Pipelines/7. T_cell_pipline_proportion_analysis.ipynb
+
+## Supplementary Figure 12
+- Sc&TCR_Pipelines/7. T_cell_pipline_proportion_analysis.ipynb
+
+## Supplementary Figure 13
+- Sc&TCR_Pipelines/7. T_cell_pipline_proportion_analysis.ipynb (a, c)
+- Sc&TCR_Pipelines/9. Clonotype_T_cell_pipline_Migration.ipynb (b, e)
+- Sc&TCR_Pipelines/11.Migration_analysis.ipynb (d)
+
+## Supplementary Figure 14
+- Sc&TCR_Pipelines/10.Donor_recipient_by_cell_type_freemuxlet.ipynb
+
+## Supplementary Figure 15
+- Sc&TCR_Pipelines/6. T_cell_pipline_T_cell_subsets_signatures.ipynb (b)
+- Sc&TCR_Pipelines/7. T_cell_pipline_proportion_analysis.ipynb (a, d–g)
+
+## Supplementary Figure 16
+- Sc&TCR_Pipelines/7. T_cell_pipline_proportion_analysis.ipynb
+
+## Supplementary Figure 17
+- Sc&TCR_Pipelines/15a. Mapping_clones_between_MLR_and_tissue_TCRB_with_new_patients_all_Tcells.ipynb
+- Sc&TCR_Pipelines/15b. Mapping_clones_between_MLR_and_tissue_TCRB_with_new_patients_map_to_donors.ipynb
+
+## Supplementary Figure 18
+- Sc&TCR_Pipelines/11.Migration_analysis.ipynb
+
+## Supplementary Figure 19
+- Sc&TCR_Pipelines/11.Migration_analysis.ipynb
+
+## Supplementary Figure 20
+- Sc&TCR_Pipelines/7. T_cell_pipline_proportion_analysis.ipynb
+
+## Supplementary Figure 21
+- Sc&TCR_Pipelines/13. CellTypist_analysis_for_T_cells_3_resi_cluster.ipynb
+
+## Supplementary Figure 22
+- Sc&TCR_Pipelines/12.Tcell_clonaltype_analysis_with_refined_cluster.ipynb
+
+## Supplementary Figure 23
+- Sc&TCR_Pipelines/TRB_clonality_validation.ipynb
+
+## Supplementary Figure 24
+- DecipherTCR/2. decipher_ananlysis_GVHD_main_Tcells_CD8_conv_deg_4cluster_clean_with_figures_mobile_balanced.ipynb
+
+## Supplementary Figure 25
+- DecipherTCR/2. decipher_ananlysis_GVHD_main_Tcells_CD8_conv_deg_4cluster_clean_with_figures_mobile_balanced.ipynb
+
+## Supplementary Figure 26
+- StarfyshHD/starfysh_ST_celltype_proportion_with_figures_clean.ipynb
+
+## Supplementary Figure 27
+
+`StarfyshHD/CellSAM_Segmentation.ipynb` is the notebook this figure should come from, but the file is currently empty (0 bytes) in this repository and will need to be restored.
+
+## Supplementary Figure 28
+- StarfyshHD/Starfysh_tutorial_integration_all_with_no_arch_with_figures_final_github.ipynb
+
+## Supplementary Figure 29
+- StarfyshHD/starfysh_ST_celltype_proportion_with_figures_clean.ipynb
+
+## Supplementary Figure 30
+- StarfyshHD/starfysh_ST_distance_analysis.ipynb (a, b)
+- StarfyshHD/CellphoneDB_Analysis.ipynb (c)
+
+## Supplementary Figure 31
+
+Gating strategy for cell sorting (flow cytometry); not produced by a notebook in this repository.
+
+## Supplementary Figure 32
+- Sc&TCR_Pipelines/7. T_cell_pipline_proportion_analysis.ipynb
+
+## Supplementary Figure 33
+- Sc&TCR_Pipelines/11.Migration_analysis.ipynb
+
 Data Access
 
 Acknowlegement
