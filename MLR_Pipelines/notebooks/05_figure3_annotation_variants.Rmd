@@ -1,0 +1,495 @@
+---
+title: "05 - Figure 3 Annotation Variants (p-value <-> asterisk) and Data-point Counts"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+source(file.path(dirname(getwd()), "config", "config.R"))
+source(file.path(dirname(getwd()), "functions", "mlr_functions.R"))
+
+# Load only what's needed to reproduce the three target figures
+clinical_data       <- readRDS(file.path(PROCESSED_DATA_PATH, "clinical_data_full.rds"))
+meta_data_clin      <- readRDS(file.path(PROCESSED_DATA_PATH, "meta_data_clin.rds"))
+meta_data           <- readRDS(file.path(PROCESSED_DATA_PATH, "meta_data.rds"))
+data_CD48_all       <- readRDS(file.path(PROCESSED_DATA_PATH, "data_CD48_all.rds"))
+# data_CD48_all_expand sourced from data/processed_corrected (R098 expansion-cutoff
+# fix) so all_All_byPTCy_pvalue.pdf reflects the corrected Patient_098 cutoff.
+data_CD48_all_expand<- readRDS(file.path(FIGURE_1_2_DIR, "data/processed_corrected", "data_CD48_all_expand.rds"))
+patient_data_all_2  <- readRDS(file.path(PROCESSED_DATA_PATH, "patient_data_all_2.rds"))
+patient_data_all    <- readRDS(file.path(PROCESSED_DATA_PATH, "patient_data_all_df.rds"))
+remove_pat_regx <- ""
+
+#' Build and save a sample-size companion bar chart next to an existing figure.
+#' @param tab data.frame with columns: group (+ optional bins), N
+#' @param save_dir Main_fig subfolder (e.g. "Figure1")
+#' @param basename original figure's basename (no extension); saved as <basename>_sample_size.pdf/png
+make_sample_size_fig <- function(tab, group_col, title, colors, save_dir, basename, bins_col = NULL, w = 7, h = 5) {
+  total_n <- sum(tab$N)
+  if (is.null(bins_col)) {
+    p <- ggplot(tab, aes(x = .data[[group_col]], y = N, fill = .data[[group_col]])) +
+      geom_col(width = 0.6) +
+      geom_text(aes(label = N), vjust = -0.3, size = 5) +
+      theme_bw(base_size = 13) + theme(legend.position = "none")
+  } else {
+    p <- ggplot(tab, aes(x = .data[[bins_col]], y = N, fill = .data[[group_col]])) +
+      geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+      geom_text(aes(label = N), position = position_dodge(width = 0.8), vjust = -0.3, size = 3.5) +
+      theme_bw(base_size = 12) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    w <- max(w, 8)
+  }
+  p <- p + scale_fill_manual(values = colors) +
+    labs(title = paste0(title, " - Sample Sizes (Total N = ", total_n, ")"), y = "N")
+  ggsave(file.path(OUTPUT_PATH, save_dir, paste0(basename, "_sample_size.png")), p, width = w, height = h, dpi = 300)
+  ggsave(file.path(OUTPUT_PATH, save_dir, paste0(basename, "_sample_size.pdf")), p, width = w, height = h, dpi = 300)
+  invisible(p)
+}
+grade3_colors <- c("No" = "#09BB8C", "Mild" = "#005A8F", "Severe" = "#B85000", "Unclassified/Severe" = "grey50")
+grade2_colors <- c("No and Mild" = "#058b8e", "Severe" = "#B85000")
+ptcy_colors   <- c("No PTCy" = "#E6BE60", "PTCy" = "#A483AF")
+```
+
+# 1. CombinedPTCy.png  (currently p-value text -> add asterisk version)
+
+Data construction copied verbatim from `notebooks/02_clone_analysis.Rmd` (lines ~835-869).
+
+```{r}
+patient_data_allo <- dplyr::full_join(patient_data_all_2, meta_data,  by = "PatientID")
+colnames(patient_data_allo) <- sapply(colnames(patient_data_allo), function(x){str_replace_all(x, "-", "")})
+patient_data_allo <- patient_data_allo[patient_data_allo$Rep_div == "allo",]
+patient_data_allo <- patient_data_allo[which(!is.na(patient_data_allo$timepoint)),]
+
+patient_data_allo_copy <- patient_data_allo%>%
+  mutate(timepoint = strtoi(timepoint))
+patient_data_allo_copy <- patient_data_allo_copy[which(!is.na(patient_data_allo_copy$timepoint)),]
+patient_data_allo_copy <- patient_data_allo_copy[which(!is.na(patient_data_allo_copy$shannons.diversity)),]
+patient_data_allo_copy <- patient_data_allo_copy%>%
+  mutate(GVHD_grade_14 = ifelse(GVHD_grade_14 == "Yes", 1, 0), GVHD_grade_24 = ifelse(GVHD_grade_24 == "Yes", 1, 0), GVHD_grade_34 = ifelse(GVHD_grade_34 == "Yes", 1, 0))%>%
+  mutate(GVHD_GRADE = GVHD_grade_14 + GVHD_grade_24 + GVHD_grade_34)
+
+data_CD48_all_expand_adj <- dplyr::full_join(data_CD48_all, clinical_data, by = 'PatientID')
+data_CD48_all_expand_adj <- data_CD48_all_expand_adj[!is.na(data_CD48_all_expand_adj$cdr3_amino_acid),]
+
+Both_results <- num_clone_fig(data_CD48_all, "PTCy", "PTCy vs No PTCy", num_cuts = 7, legend_title = "Treatment")
+immdata_meta <- dplyr::full_join(Both_results[[4]], meta_data_clin, by = "PatientID")%>%
+  mutate(PTCy = PTCy.x)%>%
+  filter(!is.na(PTCy))
+
+patient_data_allo_copy <- patient_data_allo_copy %>%
+  filter(timepoint != 3)
+
+if(remove_pat_regx != ""){
+  data_CD48_all_expand_adj <- data_CD48_all_expand_adj[!grepl(remove_pat_regx,data_CD48_all_expand_adj$PatientID),]
+  patient_data_allo_copy <- patient_data_allo_copy[!grepl(remove_pat_regx,patient_data_allo_copy$PatientID),]
+}
+```
+
+# 1b. CombinedPTCy_365_consistent.png -- apply the Figure-1C-style consistent filter to the PTCy comparison
+
+`C_365_signif_hochberg.png` (the corrected Figure 1C) draws all three of its panels from one
+consistently filtered set: `timepoint > 3 & timepoint < 365 & cum_freq > 0` (cum. freq /
+Shannon panels) and `timepoint > 3 & timepoint < 365 & n > 0` (# of clones panel).
+
+This section re-derives `patient_data_allo_copy`/`immdata_meta` (as they exist right now,
+before Section 3 redefines `patient_data_allo_copy` from a different source) with that same
+consistent `>3d & <365d & non-zero` window applied to all three panels, keeping everything
+else (grouping by `PTCy`, p-value-text annotation, colors, theme) identical to the original
+`CombinedPTCy.png` -- so the only thing that differs between the two figures is the filter.
+
+```{r}
+patient_data_allo_365_ptcy <- patient_data_allo_copy[
+  patient_data_allo_copy$timepoint < 365 &
+  patient_data_allo_copy$timepoint > 3 &
+  !is.na(patient_data_allo_copy$cum_freq) &
+  patient_data_allo_copy$cum_freq > 0, ]
+
+immdata_meta_365_ptcy <- immdata_meta[
+  !is.na(immdata_meta$timepoint) &
+  immdata_meta$timepoint < 365 &
+  immdata_meta$timepoint > 3 &
+  immdata_meta$n > 0, ]
+
+cat("Panel 1 & 2 (cum_freq, Shannon entropy) -- patient_data_allo_365_ptcy\n")
+cat("  total rows:", nrow(patient_data_allo_365_ptcy), "\n")
+print(table(patient_data_allo_365_ptcy$PTCy))
+
+cat("\nPanel 3 (# of clones) -- immdata_meta_365_ptcy\n")
+cat("  total rows:", nrow(immdata_meta_365_ptcy), "\n")
+print(table(immdata_meta_365_ptcy$PTCy))
+```
+
+```{r, fig.width = 21, fig.height = 5}
+cum_freq_plot_365 <- ggplot(patient_data_allo_365_ptcy, aes(x = PTCy, y = cum_freq, group = PTCy, fill = PTCy))+
+  geom_boxplot()+
+  stat_compare_means(comparisons = list(c("PTCy", "No PTCy")), method = "wilcox.test", label = "p.format", hide.ns = TRUE)+
+  geom_beeswarm()+
+  scale_y_continuous(trans = "log10", labels = scales::number_format(accuracy = 0.0001))+
+  labs(y = "Alloreactive\n Cumulative Frequency")+
+  theme_pubr()+
+  theme(text = element_text(size = 24), legend.text = element_markdown(), legend.position = "none")+
+    scale_fill_manual(values = c("#E6BE60", "#A483AF"),
+                    labels = c(
+      `No PTCy` = "<span style='color:#E6BE60;'>No PTCy</span>",
+      PTCy = "<span style='color:#A483AF;'>PTCy</span>"))
+
+shannons_plot_365 <- ggplot(patient_data_allo_365_ptcy, aes(x = PTCy, y = shannons.entropy, group = PTCy, fill = PTCy))+
+  geom_boxplot()+
+  stat_compare_means(comparisons = list(c("PTCy", "No PTCy")), method = "wilcox.test", label = "p.format", hide.ns = TRUE)+
+  geom_beeswarm()+
+  labs(y = "Shannon's Diversity Index")+
+  scale_y_continuous(labels = scales::number_format(accuracy = 1))+
+  theme_pubr()+
+  theme(text = element_text(size = 24), legend.text = element_markdown())+
+    scale_fill_manual(values = c("#E6BE60", "#A483AF"),
+                    labels = c(
+      `No PTCy` = "<span style='color:#E6BE60;'>No PTCy</span>",
+      PTCy = "<span style='color:#A483AF;'>PTCy</span>"))
+
+unique_clone_ptcy_plot_365 <- ggplot(immdata_meta_365_ptcy, aes(x = PTCy, y = n+1, group = PTCy, fill = PTCy))+
+  geom_boxplot()+
+  stat_compare_means(comparisons = list(c("PTCy", "No PTCy")), method = "wilcox.test", label = "p.format", hide.ns = TRUE)+
+  geom_beeswarm()+
+  scale_y_continuous(trans = "log10", labels = scales::number_format(accuracy = 1))+
+  scale_x_discrete(na.translate = F)+
+  theme_pubr()+
+  theme(text = element_text(size = 24), legend.text = element_markdown(), legend.position = "none")+
+  labs(y = "# of Clones")+
+    scale_fill_manual(values = c("#E6BE60", "#A483AF"),
+                    labels = c(
+      `No PTCy` = "<span style='color:#E6BE60;'>No PTCy</span>",
+      PTCy = "<span style='color:#A483AF;'>PTCy</span>"))
+
+combined_plot_365 <- plot_grid(cum_freq_plot_365, shannons_plot_365, unique_clone_ptcy_plot_365, nrow = 1, align = "hv")
+plot(combined_plot_365)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure3/CombinedPTCy_365_consistent.png'), combined_plot_365, width = 21, height = 5, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure3/CombinedPTCy_365_consistent.pdf'), combined_plot_365, width = 21, height = 5, dpi = 600)
+
+tab_2f <- patient_data_allo_365_ptcy %>% group_by(PTCy) %>% summarise(N = n(), .groups = "drop")
+make_sample_size_fig(tab_2f, "PTCy", "CombinedPTCy_365_consistent", ptcy_colors, "Figure3", "CombinedPTCy_365_consistent")
+```
+
+## Asterisk-annotation version of CombinedPTCy_365_consistent (only `label` changed: "p.format" -> "p.signif")
+
+Same `patient_data_allo_365_ptcy`/`immdata_meta_365_ptcy` (same consistent filter, same 105
+patient-timepoints), same grouping/colors/theme -- only the annotation style differs, so this
+is the asterisk counterpart of `CombinedPTCy_365_consistent.png` (p-value version kept above).
+
+```{r, fig.width = 21, fig.height = 5}
+cum_freq_plot_365_signif <- ggplot(patient_data_allo_365_ptcy, aes(x = PTCy, y = cum_freq, group = PTCy, fill = PTCy))+
+  geom_boxplot()+
+  stat_compare_means(comparisons = list(c("PTCy", "No PTCy")), method = "wilcox.test", label = "p.signif", hide.ns = TRUE)+
+  geom_beeswarm()+
+  scale_y_continuous(trans = "log10", labels = scales::number_format(accuracy = 0.0001))+
+  labs(y = "Alloreactive\n Cumulative Frequency")+
+  theme_pubr()+
+  theme(text = element_text(size = 24), legend.text = element_markdown(), legend.position = "none")+
+    scale_fill_manual(values = c("#E6BE60", "#A483AF"),
+                    labels = c(
+      `No PTCy` = "<span style='color:#E6BE60;'>No PTCy</span>",
+      PTCy = "<span style='color:#A483AF;'>PTCy</span>"))
+
+shannons_plot_365_signif <- ggplot(patient_data_allo_365_ptcy, aes(x = PTCy, y = shannons.entropy, group = PTCy, fill = PTCy))+
+  geom_boxplot()+
+  stat_compare_means(comparisons = list(c("PTCy", "No PTCy")), method = "wilcox.test", label = "p.signif", hide.ns = TRUE)+
+  geom_beeswarm()+
+  labs(y = "Shannon's Diversity Index")+
+  scale_y_continuous(labels = scales::number_format(accuracy = 1))+
+  theme_pubr()+
+  theme(text = element_text(size = 24), legend.text = element_markdown())+
+    scale_fill_manual(values = c("#E6BE60", "#A483AF"),
+                    labels = c(
+      `No PTCy` = "<span style='color:#E6BE60;'>No PTCy</span>",
+      PTCy = "<span style='color:#A483AF;'>PTCy</span>"))
+
+unique_clone_ptcy_plot_365_signif <- ggplot(immdata_meta_365_ptcy, aes(x = PTCy, y = n+1, group = PTCy, fill = PTCy))+
+  geom_boxplot()+
+  stat_compare_means(comparisons = list(c("PTCy", "No PTCy")), method = "wilcox.test", label = "p.signif", hide.ns = TRUE)+
+  geom_beeswarm()+
+  scale_y_continuous(trans = "log10", labels = scales::number_format(accuracy = 1))+
+  scale_x_discrete(na.translate = F)+
+  theme_pubr()+
+  theme(text = element_text(size = 24), legend.text = element_markdown(), legend.position = "none")+
+  labs(y = "# of Clones")+
+    scale_fill_manual(values = c("#E6BE60", "#A483AF"),
+                    labels = c(
+      `No PTCy` = "<span style='color:#E6BE60;'>No PTCy</span>",
+      PTCy = "<span style='color:#A483AF;'>PTCy</span>"))
+
+combined_plot_365_signif <- plot_grid(cum_freq_plot_365_signif, shannons_plot_365_signif, unique_clone_ptcy_plot_365_signif, nrow = 1, align = "hv")
+plot(combined_plot_365_signif)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure3/CombinedPTCy_365_consistent_signif.png'), combined_plot_365_signif, width = 21, height = 5, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure3/CombinedPTCy_365_consistent_signif.pdf'), combined_plot_365_signif, width = 21, height = 5, dpi = 600)
+
+tab_2f_signif <- patient_data_allo_365_ptcy %>% group_by(PTCy) %>% summarise(N = n(), .groups = "drop")
+make_sample_size_fig(tab_2f_signif, "PTCy", "CombinedPTCy_365_consistent_signif", ptcy_colors, "Figure3", "CombinedPTCy_365_consistent_signif")
+```
+
+# 2. all_All_byPTCy.png  (currently asterisks -> add p-value version)
+
+`count_clones`/`num_clones` copied verbatim from `notebooks/03_grade_ptcy_analysis.Rmd` (lines ~932-1045);
+`num_clones` already exposes a `pval_label` argument, so the p-value version only requires
+calling it with `pval_label = "p.adj.exact"` instead of the default `"p.adj.signif"`.
+
+```{r}
+count_clones <- function(data, type, metric = "cum_freq", num_cuts = 5, group_by = c("PatientID","timepoint", "PTCy")){
+  data_proc <- data%>%
+    group_by(across(all_of(c(group_by, type))))%>%
+    dplyr::summarise(num_clones = sum(frequency), .groups = "keep")
+
+  data_pre <- data_proc[grepl("MLR|unstim", data_proc$timepoint),]
+
+  data_proc <- data_proc %>%
+    mutate(timepoint = strtoi(timepoint))
+  data_proc <- data_proc[!is.na(data_proc$timepoint),]
+
+  data_post <- data_proc[data_proc$timepoint <= 365 & data_proc$timepoint > 3,] %>%
+    subset(!is.na(timepoint))%>%
+    ungroup()
+
+  qs <- matrix(nrow = length(unique(data_post[[type]])), ncol = num_cuts+1)
+  for(i in seq_along(unique(data_post[[type]]))){
+    t <- unique(data_post[[type]])[[i]]
+    qs[i,] <- quantile(data_post[data_post[[type]] == t,]$timepoint, probs = 0:num_cuts/num_cuts)
+  }
+
+  qs_breaks <- apply(qs,2, max)
+  breaks <- unique(quantile(data_post$timepoint, probs = 0:num_cuts/num_cuts))
+
+  data_post <- data_post%>%
+    mutate(bins = cut(timepoint,breaks = breaks, include.lowest = TRUE))
+
+  return(list(data_pre, data_post))
+}
+
+num_clones <- function(data, type, metric = "cum_freq", num_cuts = 5, title, ylab = "Allo Frequency", text_size = 20, group_by = c("PatientID", "timepoint", "PTCy"), pval_label = "p.adj.signif", pval_size = 8) {
+
+  results <- count_clones(data, type, metric, num_cuts, group_by = group_by)
+  data_post <- results[[2]]
+  data_post$type_num <- as.numeric(factor(data_post[[type]]))
+
+  data_post_n0 <- data_post %>%
+    filter(num_clones != 0)
+
+  wilcox_results <- compare_means(as.formula(paste0("num_clones ~ ", type)), data = data_post, group.by = "bins")
+
+  stat_test <- data_post %>%
+    group_by(bins) %>%
+    pairwise_wilcox_test(as.formula(paste0("num_clones ~ ", type)), p.adjust.method = "hochberg") %>%
+    add_xy_position(x = "bins") %>%
+    mutate(
+      p.adj = p.adjust(p, method = "hochberg"),
+      p.adj.signif = symnum(
+        p.adj,
+        cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1),
+        symbols = c("****", "***", "**", "*", "ns")
+      ),
+      p.adj.exact = ifelse(p.adj < 0.001, sprintf("p = %.2e", p.adj), sprintf("p = %.3f", p.adj))
+    )
+
+  box_plot_post <- ggboxplot(data_post, x = "bins", y = "num_clones", fill = type) +
+    stat_pvalue_manual(stat_test, label = pval_label, tip.length = 0.01, step.increase = 0.00, bracket.nudge.y = -1, size = pval_size) +
+    geom_beeswarm(data = data_post_n0, position = "dodge", dodge.width = .75, na.rm = TRUE, aes(x = bins, y = num_clones, group = .data[[type]])) +
+    scale_y_continuous(trans = 'log10', labels = scales::number_format(accuracy = 0.0001)) +
+    theme_pubr() +
+    theme(
+      text = element_text(size = text_size),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(color = "black"),
+      axis.ticks.length = unit(0.25, "cm"),
+      legend.text = element_markdown()
+    ) +
+    labs(y = ylab, title = title, x = "Days")
+
+  data_post <- data_post %>%
+    mutate(timepoint = as.character(timepoint))
+  data <- bind_rows(data_post)
+
+  return(list(box_plot_post, wilcox_results, data))
+}
+```
+
+Data construction copied verbatim from `notebooks/03_grade_ptcy_analysis.Rmd` (lines ~1051-1065):
+
+```{r, warning=FALSE, fig.width=9.5, fig.height = 5}
+data_CD48_all_expand_adj <- data_CD48_all_expand
+data_CD48_all_expand_adj$cell_type <- gsub(" ", "",data_CD48_all_expand_adj$cell_type )
+data_CD48_all_expand_adj <- dplyr::full_join(data_CD48_all_expand_adj, clinical_data, by = "PatientID")
+data_CD48_all_expand_adj <- data_CD48_all_expand_adj%>%
+  mutate(GVHD_GRADE_1 = ifelse(grepl("Severe", GVHD_GRADE_1), "Severe", GVHD_GRADE_1))
+
+if(remove_pat_regx != ""){
+  data_CD48_all_expand_adj <- data_CD48_all_expand_adj[!grepl(remove_pat_regx,data_CD48_all_expand_adj$PatientID),]
+}
+
+data_CD48_all_expand_adj <- data_CD48_all_expand_adj%>%
+  mutate(GVHD_GRADE_1 = ifelse(grepl("No|Mild", GVHD_GRADE_1), "No/Mild", "Severe"))
+
+result_All_byPTCy <- num_clones(data_CD48_all_expand_adj, "PTCy", num_cuts = 4, title = "PTCy vs No PTCy", ylab = "Alloreactive \n Cumulative Frequency", pval_label = "p.adj.signif", pval_size = 6)
+
+All_byPTCy <- result_All_byPTCy[[1]]+
+    scale_fill_manual(values = c("#E6BE60", "#A483AF"),
+                    labels = c(
+      `No PTCy` = "<span style='color:#E6BE60;'>No PTCy</span>",
+      PTCy = "<span style='color:#A483AF;'>PTCy</span>"))
+
+plot(All_byPTCy)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure3/all_All_byPTCy.png'), All_byPTCy, width = 9.5, height = 5, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure3/all_All_byPTCy.pdf'), All_byPTCy, width = 9.5, height = 5, dpi = 600)
+
+tab_2g_sig <- result_All_byPTCy[[3]] %>% group_by(bins, PTCy) %>% summarise(N = n(), .groups = "drop") %>% rename(group = PTCy)
+make_sample_size_fig(tab_2g_sig, "group", "all_All_byPTCy", ptcy_colors, "Figure3", "all_All_byPTCy", bins_col = "bins")
+
+result_All_byPTCy_pvalue <- num_clones(data_CD48_all_expand_adj, "PTCy", num_cuts = 4, title = "PTCy vs No PTCy", ylab = "Alloreactive \n Cumulative Frequency", pval_label = "p.adj.exact", pval_size = 6)
+
+All_byPTCy_pvalue <- result_All_byPTCy_pvalue[[1]]+
+    scale_fill_manual(values = c("#E6BE60", "#A483AF"),
+                    labels = c(
+      `No PTCy` = "<span style='color:#E6BE60;'>No PTCy</span>",
+      PTCy = "<span style='color:#A483AF;'>PTCy</span>"))
+
+plot(All_byPTCy_pvalue)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure3/all_All_byPTCy_pvalue.png'), All_byPTCy_pvalue, width = 9.5, height = 5, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure3/all_All_byPTCy_pvalue.pdf'), All_byPTCy_pvalue, width = 9.5, height = 5, dpi = 600)
+
+tab_2g <- result_All_byPTCy_pvalue[[3]] %>% group_by(bins, PTCy) %>% summarise(N = n(), .groups = "drop") %>% rename(group = PTCy)
+make_sample_size_fig(tab_2g, "group", "all_All_byPTCy_pvalue", ptcy_colors, "Figure3", "all_All_byPTCy_pvalue", bins_col = "bins")
+```
+
+# 3. ByPTCy_Shannon_GVHD_GRADE_1.png  (currently asterisks -> add p-value version)
+
+`div_clones` copied verbatim, `div_cut` copied with one addition mirroring the `num_clones`
+pattern above: a `pval_label` argument (default `"p.adj.signif"`, kept identical to the
+original) plus a `p.adj.exact` column so we can request a p-value-text version, from
+`notebooks/04_cumulative_figures.Rmd` (lines ~45-124).
+
+```{r}
+div_clones <- function(data, type, div_metric = "shannons.entropy", num_cuts = 5){
+  data_pre <- data[grepl("MLR|unstim", data$SampleID),]%>%
+    dplyr::mutate(timepoint = SampleID)
+
+  data_proc <- data %>%
+    dplyr::mutate(timepoint = strtoi(SampleID))
+  data_proc <- data_proc[!is.na(data_proc$timepoint),]
+
+  data_post <- data_proc[data_proc$timepoint <= 365 & data_proc$timepoint > 3,] %>%
+    ungroup() %>%
+    dplyr::mutate(bins = cut(timepoint, breaks = unique(quantile(timepoint, probs = 0:num_cuts/num_cuts)), include.lowest = TRUE))
+
+  return(list(data_pre, data_post))
+}
+
+div_cut <- function(data, type, div_metric = "shannons.entropy", num_cuts = 5, text_size = 20, ylab = "", title = "", pval_label = "p.adj.signif", pval_size = NULL){
+  results <- div_clones(data, type, div_metric, num_cuts)
+  data_pre <- results[[1]]
+  data_post <- results[[2]]
+
+  print(unique(data_pre[[type]]))
+
+  data_post_sum <- data_post %>%
+    group_by(across(all_of(c("bins", type)))) %>%
+    summarise(n_each = n())
+
+  stat_test <- data_post %>%
+    group_by(bins) %>%
+    pairwise_wilcox_test(as.formula(paste0(div_metric, " ~ ", type)), p.adjust.method = "hochberg") %>%
+    rstatix::add_xy_position(x = "bins") %>%
+    mutate(
+      p.adj.exact = ifelse(p.adj < 0.001, sprintf("p = %.2e", p.adj), sprintf("p = %.3f", p.adj))
+    )
+
+  pvm_args <- list(stat_test, label = pval_label, tip.length = 0.01, step.increase = 0.001)
+  if (!is.null(pval_size)) pvm_args$size <- pval_size
+
+  box_plot_post <- ggboxplot(data_post, x = "bins", y = div_metric, fill = type, outlier.shape = NA) +
+    do.call(stat_pvalue_manual, pvm_args) +
+    geom_beeswarm(position = "dodge", dodge.width = .75, aes(group = .data[[type]])) +
+    scale_y_continuous(labels = scales::number_format(accuracy = 1))+
+    theme_pubr() +
+    theme(
+      legend.text = element_markdown(),
+      text = element_text(size = text_size),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(color = "black"),
+      axis.ticks = element_blank(),
+      axis.ticks.length = unit(0.25, "cm")
+    ) +
+    labs(y = ylab, title = title)
+
+  return(list(box_plot_post, stat_test, data_post))
+}
+```
+
+# 4. ByPTCy_Shannon — relaxed filter (only remove NA shannons.diversity, keep R070)
+
+Same as Section 3 but replacing `!is.na(slope)` with `!is.na(shannons.diversity)`
+and keeping R070. Maximum achievable: 115 data points.
+
+```{r, fig.width=8, fig.height=4}
+patient_data_allo_copy_ns <- patient_data_all[patient_data_all$Rep_div == "allo", ]
+
+patient_data_all_clinic_ns <- dplyr::full_join(patient_data_allo_copy_ns, meta_data_clin, by = "PatientID") %>%
+  try(mutate(PTCy = PTCy.x)) %>%
+  try(select(-c(PTCy.x, PTCy.y))) %>%
+  mutate(GVHD_GRADE_1 = ifelse(grepl("Severe", GVHD_GRADE_1), "Severe", "No and Mild")) %>%
+  mutate(GVHD_GRADE_1 = factor(GVHD_GRADE_1, levels = c("No and Mild", "Severe")))
+
+patient_data_all_clinic_ns <- patient_data_all_clinic_ns[!is.na(patient_data_all_clinic_ns$shannons.diversity), ]
+
+result_byPTCy_ns <- div_cut(patient_data_all_clinic_ns, "PTCy", num_cuts = 4,
+                             div_metric = "shannons.diversity",
+                             ylab = "Shannon's Diversity",
+                             title = "PTCy vs No PTCy",
+                             pval_label = "p.adj.exact")
+
+ByPTCy_Shannon_ns <- result_byPTCy_ns[[1]] +
+  scale_fill_manual(values = c("#E6BE60", "#A483AF"),
+                    labels = c(
+                      `No PTCy` = "<span style='color:#E6BE60;'>No PTCy</span>",
+                      PTCy = "<span style='color:#A483AF;'>PTCy</span>")) +
+  labs(x = "Days")
+
+plot(ByPTCy_Shannon_ns)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure3/ByPTCy_Shannon_GVHD_GRADE_1_noSlopeFilter.png'), ByPTCy_Shannon_ns, width = 8, height = 4, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure3/ByPTCy_Shannon_GVHD_GRADE_1_noSlopeFilter.pdf'), ByPTCy_Shannon_ns, width = 8, height = 4, dpi = 600)
+
+tab_2h <- result_byPTCy_ns[[3]] %>% group_by(bins, PTCy) %>% summarise(N = n(), .groups = "drop") %>% rename(group = PTCy)
+make_sample_size_fig(tab_2h, "group", "ByPTCy_Shannon_GVHD_GRADE_1_noSlopeFilter", ptcy_colors, "Figure3", "ByPTCy_Shannon_GVHD_GRADE_1_noSlopeFilter", bins_col = "bins")
+```
+
+
+## Asterisk version
+
+```{r, fig.width=8, fig.height=4}
+result_byPTCy_ns_signif <- div_cut(patient_data_all_clinic_ns, "PTCy", num_cuts = 4,
+                                    div_metric = "shannons.diversity",
+                                    ylab = "Shannon's Diversity",
+                                    title = "PTCy vs No PTCy",
+                                    pval_label = "p.adj.signif")
+
+ByPTCy_Shannon_ns_signif <- result_byPTCy_ns_signif[[1]] +
+  scale_fill_manual(values = c("#E6BE60", "#A483AF"),
+                    labels = c(
+                      `No PTCy` = "<span style='color:#E6BE60;'>No PTCy</span>",
+                      PTCy = "<span style='color:#A483AF;'>PTCy</span>")) +
+  labs(x = "Days")
+
+plot(ByPTCy_Shannon_ns_signif)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure3/ByPTCy_Shannon_GVHD_GRADE_1_noSlopeFilter_signif.png'), ByPTCy_Shannon_ns_signif, width = 8, height = 4, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure3/ByPTCy_Shannon_GVHD_GRADE_1_noSlopeFilter_signif.pdf'), ByPTCy_Shannon_ns_signif, width = 8, height = 4, dpi = 600)
+
+tab_2h_signif <- result_byPTCy_ns_signif[[3]] %>% group_by(bins, PTCy) %>% summarise(N = n(), .groups = "drop") %>% rename(group = PTCy)
+make_sample_size_fig(tab_2h_signif, "group", "ByPTCy_Shannon_GVHD_GRADE_1_noSlopeFilter_signif", ptcy_colors, "Figure3", "ByPTCy_Shannon_GVHD_GRADE_1_noSlopeFilter_signif", bins_col = "bins")
+```

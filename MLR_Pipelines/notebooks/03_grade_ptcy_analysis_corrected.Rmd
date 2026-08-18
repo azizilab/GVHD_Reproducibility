@@ -1,0 +1,723 @@
+---
+title: "03 - Grade and PTCy Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+source(file.path(dirname(getwd()), "config", "config.R"))
+# R098 expansion-cutoff fix (00_data_loading_corrected.Rmd) writes to
+# data/processed_corrected/, not data/processed/ -- read from there so
+# data_CD48_all / data_CD48_all_expand reflect the corrected Patient_098 cutoff.
+PROCESSED_DATA_PATH <- file.path(FIGURE_1_2_DIR, "data/processed_corrected")
+source(file.path(dirname(getwd()), "functions", "mlr_functions.R"))
+
+# Load data from previous notebooks
+data <- readRDS(file.path(PROCESSED_DATA_PATH, "patient_data_all.rds"))
+data_allo <- readRDS(file.path(PROCESSED_DATA_PATH, "patient_data_allo.rds"))
+data_nonallo <- readRDS(file.path(PROCESSED_DATA_PATH, "data_nonallo_list.rds"))
+data_meta <- readRDS(file.path(PROCESSED_DATA_PATH, "data_meta.rds"))
+all_full_allo <- readRDS(file.path(PROCESSED_DATA_PATH, "all_full_allo.rds"))
+filenames <- readRDS(file.path(PROCESSED_DATA_PATH, "filenames.rds"))
+clinical_data <- readRDS(file.path(PROCESSED_DATA_PATH, "clinical_data_full.rds"))
+data_squished <- readRDS(file.path(PROCESSED_DATA_PATH, "data_squished.rds"))
+data_squished_w0 <- readRDS(file.path(PROCESSED_DATA_PATH, "data_squished_w0.rds"))
+data_allo_squished <- readRDS(file.path(PROCESSED_DATA_PATH, "data_allo_squished.rds"))
+data_allo_squished_w0 <- readRDS(file.path(PROCESSED_DATA_PATH, "data_allo_squished_w0.rds"))
+data_nonallo_squished <- readRDS(file.path(PROCESSED_DATA_PATH, "data_nonallo_squished.rds"))
+data_nonallo_squished_w0 <- readRDS(file.path(PROCESSED_DATA_PATH, "data_nonallo_squished_w0.rds"))
+meta_data_clin <- readRDS(file.path(PROCESSED_DATA_PATH, "meta_data_clin.rds"))
+meta_data <- readRDS(file.path(PROCESSED_DATA_PATH, "meta_data.rds"))
+expanded_clones <- readRDS(file.path(PROCESSED_DATA_PATH, "expanded_clones.rds"))
+data_CD48_all <- readRDS(file.path(PROCESSED_DATA_PATH, "data_CD48_all.rds"))
+data_CD48_all_expand <- readRDS(file.path(PROCESSED_DATA_PATH, "data_CD48_all_expand.rds"))
+# patient_data_all_df.rds/data_squished_time.rds/patient_data_all_2.rds are produced
+# only by notebook 01 (no corrected counterpart), so they live in the original
+# data/processed/, not data/processed_corrected/.
+patient_data_all <- readRDS(file.path(FIGURE_1_2_DIR, "data/processed", "patient_data_all_df.rds"))
+data_squished_time <- readRDS(file.path(FIGURE_1_2_DIR, "data/processed", "data_squished_time.rds"))
+patient_data_all_2 <- readRDS(file.path(FIGURE_1_2_DIR, "data/processed", "patient_data_all_2.rds"))
+unique_identifiers <- c("cdr3_amino_acid", "v_resolved", "j_resolved")
+remove_pat_regx <- ""  # set to e.g. "067|070" to exclude patients
+all_rep_div        <- readRDS(file.path(PROCESSED_DATA_PATH, "all_rep_div.rds"))
+all_allo_div       <- readRDS(file.path(PROCESSED_DATA_PATH, "all_allo_div.rds"))
+all_allo_div_CD4   <- readRDS(file.path(PROCESSED_DATA_PATH, "all_allo_div_CD4.rds"))
+all_allo_div_CD8   <- readRDS(file.path(PROCESSED_DATA_PATH, "all_allo_div_CD8.rds"))
+all_nonallo_div    <- readRDS(file.path(PROCESSED_DATA_PATH, "all_nonallo_div.rds"))
+all_nonallo_div_CD4 <- readRDS(file.path(PROCESSED_DATA_PATH, "all_nonallo_div_CD4.rds"))
+all_nonallo_div_CD8 <- readRDS(file.path(PROCESSED_DATA_PATH, "all_nonallo_div_CD8.rds"))
+freq_Both_vio_ex   <- readRDS(file.path(PROCESSED_DATA_PATH, "freq_Both_vio_ex.rds"))
+
+#' Build and save a sample-size companion bar chart next to an existing figure.
+make_sample_size_fig <- function(tab, group_col, title, colors, save_dir, basename, bins_col = NULL, w = 7, h = 5) {
+  total_n <- sum(tab$N)
+  if (is.null(bins_col)) {
+    p <- ggplot(tab, aes(x = .data[[group_col]], y = N, fill = .data[[group_col]])) +
+      geom_col(width = 0.6) +
+      geom_text(aes(label = N), vjust = -0.3, size = 5) +
+      theme_bw(base_size = 13) + theme(legend.position = "none")
+  } else {
+    p <- ggplot(tab, aes(x = .data[[bins_col]], y = N, fill = .data[[group_col]])) +
+      geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+      geom_text(aes(label = N), position = position_dodge(width = 0.8), vjust = -0.3, size = 3.5) +
+      theme_bw(base_size = 12) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    w <- max(w, 8)
+  }
+  p <- p + scale_fill_manual(values = colors) +
+    labs(title = paste0(title, " - Sample Sizes (Total N = ", total_n, ")"), y = "N")
+  ggsave(file.path(OUTPUT_PATH, save_dir, paste0(basename, "_sample_size.png")), p, width = w, height = h, dpi = 300)
+  ggsave(file.path(OUTPUT_PATH, save_dir, paste0(basename, "_sample_size.pdf")), p, width = w, height = h, dpi = 300)
+  invisible(p)
+}
+grade3_colors <- c("No" = "#09BB8C", "Mild" = "#005A8F", "Severe" = "#B85000", "Unclassified/Severe" = "grey50")
+grade2_colors <- c("No and Mild" = "#058b8e", "Severe" = "#B85000")
+ptcy_colors   <- c("No PTCy" = "#E6BE60", "PTCy" = "#A483AF")
+```
+
+```{r}
+clone_fig <- function(immdata, type, title, alpha = 0.3) {
+  #' Visualize clone frequencies over time
+  #'
+  #' @description This function visualizes the frequency of clones over time for different groups using scatter and line plots.
+  #'
+  #' @param immdata A dataframe containing immunosequencing data with `timepoint`, `frequency`, `tag`, and specified `type`.
+  #' @param type A character string specifying the grouping variable for the analysis.
+  #' @param title A character string for the plot title.
+  #' @param alpha A numeric value indicating the transparency level of points and lines in the plot (default is 0.3).
+  #' @usage clone_fig(immdata, type, title, alpha)
+  #' @return A ggplot object showing the clone frequency over time.
+
+  # Convert timepoints to integer and remove NA values
+  immdata <- immdata %>%
+    mutate(timepoint = strtoi(timepoint)) %>%
+    filter(!is.na(timepoint))
+
+  # Calculate average and standard deviation of frequency per group and timepoint
+  immdata_stat <- immdata %>%
+    group_by(across(all_of(c(type, "timepoint")))) %>%
+    summarise(
+      avg_freq = mean(frequency, na.rm = TRUE),
+      std_freq = sd(frequency, na.rm = TRUE),
+      .groups = 'drop'
+    )
+
+  # Generate the plot
+  fig <- ggplot(immdata, aes(x = timepoint, y = frequency, color = .data[[type]], group = tag)) +
+    geom_point(size = 1, alpha = alpha) +
+    geom_line(alpha = alpha) +
+    labs(title = title, x = "Timepoint", y = "Frequency") +
+    scale_y_continuous(trans = "log10", labels = scales::number_format(accuracy = 0.00001)) +
+    scale_colour_discrete(na.translate = FALSE) +
+    scale_shape_discrete(na.translate = FALSE) +
+    guides(color = guide_legend(override.aes = list(alpha = 1))) +
+    theme_pubr() +
+    theme(
+      axis.text.x = element_text(angle = 60, vjust = 0.5),
+      legend.text = element_markdown(size = 20)
+    )
+
+  return(fig)
+}
+
+```
+
+
+```{r, warning=FALSE, fig.width=8, fig.height = 4}
+
+
+data_CD48_all_expand_adj <- data_CD48_all_expand
+data_CD48_all_expand_adj$cell_type <- gsub(" ", "",data_CD48_all_expand_adj$cell_type )
+data_CD48_all_expand_adj <- dplyr::full_join(data_CD48_all_expand_adj, clinical_data, by = "PatientID")%>%
+  mutate(GVHD_GRADE_1 = ifelse(grepl("Severe", GVHD_GRADE_1), "Severe", GVHD_GRADE_1))%>%
+  mutate(GVHD_GRADE_1 = factor(GVHD_GRADE_1, levels = c("No", "Mild", "Severe")))
+
+
+All_by_grade <- clone_fig(data_CD48_all_expand_adj, 'GVHD_GRADE_1', "", alpha = 0.1)
+All_by_grade_fig_ex <- All_by_grade + theme(text = element_text(size = 20))+
+  scale_color_manual(values = c("#09BB8C", "#005A8F", "#B85000", "grey"), labels = c(
+      No = "<span style='color:#09BB8C;'>No</span>",
+      Mild = "<span style='color:#005A8F;'>Mild</span>",
+      Severe = "<span style='color:#B85000;'>Severe</span>"))+
+  coord_cartesian(xlim = c(0,365))+
+  labs(y = "Expanded Alloreactive\n
+       Clone Frequency", x = "Days", color = "GVHD Grade")+
+  theme(axis.title.y = element_text(lineheight = 0.5))
+
+
+All_by_ptcy <- clone_fig(data_CD48_all_expand_adj, 'PTCy', "Expanded Alloreactive Clones", alpha = 0.3)
+All_by_ptcy_fig_ex <- All_by_ptcy +
+  theme(text = element_text(size = 20)) +
+  scale_color_manual(values = c("#E6BE60", "#A483AF"),
+                    labels = c(
+                      `No PTCy` = "<span style='color:#E6BE60;'>No PTCy</span>",
+                      PTCy = "<span style='color:#A483AF;'>PTCy</span>")) +
+  coord_cartesian(xlim = c(0,365)) +
+  labs(y = "Expanded Alloreactive\n
+       Clone Frequency", x = "Days", color = "PTCy")+
+  theme(axis.title.y = element_text(lineheight = 0.5))
+
+
+plot(All_by_grade_fig_ex)
+plot(All_by_ptcy_fig_ex)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure1/All_by_grade_fig.png'), All_by_grade_fig_ex, width = 8, height = 5, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure3/All_by_ptcy_fig.png'), All_by_ptcy_fig_ex, width = 8, height = 5, dpi = 600)
+
+
+ggsave(paste0(OUTPUT_PATH, '/Figure1/All_by_grade_fig.pdf'), All_by_grade_fig_ex, width = 8, height = 5, dpi = 600)
+tab_1g <- data_CD48_all_expand_adj %>% mutate(timepoint = strtoi(timepoint)) %>% filter(!is.na(timepoint)) %>%
+  distinct(PatientID, timepoint, GVHD_GRADE_1) %>% group_by(GVHD_GRADE_1) %>% summarise(N = n(), .groups = "drop")
+make_sample_size_fig(tab_1g, "GVHD_GRADE_1", "All_by_grade_fig", grade3_colors, "Figure1", "All_by_grade_fig")
+ggsave(paste0(OUTPUT_PATH, '/Figure3/All_by_ptcy_fig.pdf'), All_by_ptcy_fig_ex, width = 8, height = 5, dpi = 600)
+tab_8d <- data_CD48_all_expand_adj %>% mutate(timepoint = strtoi(timepoint)) %>% filter(!is.na(timepoint)) %>%
+  distinct(PatientID, timepoint, PTCy) %>% group_by(PTCy) %>% summarise(N = n(), .groups = "drop")
+make_sample_size_fig(tab_8d, "PTCy", "All_by_ptcy_fig", ptcy_colors, "Figure3", "All_by_ptcy_fig")
+
+```
+
+
+
+
+```{r}
+count_clones <- function(data, type, metric = "cum_freq", num_cuts = 5, group_by = c("PatientID","timepoint", "PTCy")){
+  #'
+  #' @description Bins the clones over time.
+  #'
+  #' @param data List of dataframes containing the data from immunoseq files.
+  #' Dataframes are obtained through the function read_immunoseq
+  #' @param type Grouping you would like to use
+  #' @param metric diverseity metric you would like to use
+  #' @param num_cuts, the number of bins you would like
+  #'
+  #'
+  #' @usage count_clones(data, type, metric = "cum_freq", num_cuts = 5)
+  #' @return updated: list(data_pre, data_post)
+  #'
+  #'
+  data_proc <- data%>%
+    group_by(across(all_of(c(group_by, type))))%>%
+    dplyr::summarise(num_clones = sum(frequency), .groups = "keep")
+
+  data_pre <- data_proc[grepl("MLR|unstim", data_proc$timepoint),] #Seperate timepoints before transplant
+
+  data_proc <- data_proc %>%
+    mutate(timepoint = strtoi(timepoint))
+  data_proc <- data_proc[!is.na(data_proc$timepoint),]
+
+
+  data_post <- data_proc[data_proc$timepoint <= 365 & data_proc$timepoint > 3,] %>%
+    subset(!is.na(timepoint))%>%
+    ungroup()
+
+  qs <- matrix(nrow = length(unique(data_post[[type]])), ncol = num_cuts+1)
+  for(i in seq_along(unique(data_post[[type]]))){
+    t <- unique(data_post[[type]])[[i]]
+    qs[i,] <- quantile(data_post[data_post[[type]] == t,]$timepoint, probs = 0:num_cuts/num_cuts)
+  }
+
+  qs_breaks <- apply(qs,2, max)
+
+  breaks <- unique(quantile(data_post$timepoint, probs = 0:num_cuts/num_cuts))
+
+  data_post <- data_post%>%
+    mutate(bins = cut(timepoint,breaks = breaks, include.lowest = TRUE))
+
+  return(list(data_pre, data_post))
+}
+
+num_clones <- function(data, type, metric = "cum_freq", num_cuts = 5, title, ylab = "Allo Frequency", text_size = 20, group_by = c("PatientID", "timepoint", "PTCy"), pval_label = "p.adj.signif", pval_size = 8) {
+  #' Analyze number of clones and visualize results
+  #'
+  #' @description This function calculates the number of clones based on specific metrics, performs statistical comparisons between groups, and visualizes the results using boxplots with significance annotations.
+  #'
+  #' @param data A dataframe containing clone data, including a `SampleID` column.
+  #' @param type A character string specifying the grouping variable for the analysis.
+  #' @param metric A character string specifying the metric to use for clone frequency calculation (default is "cum_freq").
+  #' @param num_cuts An integer indicating the number of bins to divide the timepoints into (default is 5).
+  #' @param title A character string for the plot title.
+  #' @param ylab A character string for the y-axis label in the plot (default is "Allo Frequency").
+  #' @param text_size An integer specifying the size of text in the plot (default is 20).
+  #' @param group_by A character vector specifying the grouping variables for clone counting (default is c("PatientID", "timepoint", "PTCy")).
+  #' @usage num_clones(data, type, metric, num_cuts, title, ylab, text_size, group_by)
+  #' @return A list containing the boxplot with significance annotations, the Wilcoxon test results, and the processed data.
+
+  results <- count_clones(data, type, metric, num_cuts, group_by = group_by)
+  data_post <- results[[2]]
+  data_post$type_num <- as.numeric(factor(data_post[[type]]))
+
+  # Filter data_post for non-zero clone numbers
+  data_post_n0 <- data_post %>%
+    filter(num_clones != 0)
+
+  # Perform Wilcoxon tests and adjust p-values
+  wilcox_results <- compare_means(as.formula(paste0("num_clones ~ ", type)), data = data_post, group.by = "bins")
+
+  stat_test <- data_post %>%
+    group_by(bins) %>%
+    pairwise_wilcox_test(as.formula(paste0("num_clones ~ ", type)), p.adjust.method = "hochberg") %>%
+    add_xy_position(x = "bins") %>%
+    mutate(
+      p.adj = p.adjust(p, method = "hochberg"),
+      p.adj.signif = symnum(
+        p.adj,
+        cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1),
+        symbols = c("****", "***", "**", "*", "ns")
+      ),
+      p.adj.exact = ifelse(p.adj < 0.001, sprintf("p = %.2e", p.adj), sprintf("p = %.3f", p.adj))
+    )
+
+  print(colnames(data_post)) # Print column names of data_post for debugging
+
+  # Create boxplot with significance annotations and beeswarm overlay
+  box_plot_post <- ggboxplot(data_post, x = "bins", y = "num_clones", fill = type) +
+    stat_pvalue_manual(stat_test, label = pval_label, tip.length = 0.01, step.increase = 0.00, bracket.nudge.y = -1, size = pval_size) +
+    geom_beeswarm(data = data_post_n0, position = "dodge", dodge.width = .75, na.rm = TRUE, aes(x = bins, y = num_clones, group = .data[[type]])) +
+    scale_y_continuous(trans = 'log10', labels = scales::number_format(accuracy = 0.0001), expand = expansion(mult = c(0.05, 0.15))) +
+    theme_pubr() +
+    theme(
+      text = element_text(size = text_size),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(color = "black"),
+      axis.ticks.length = unit(0.25, "cm"),
+      legend.text = element_markdown()
+    ) +
+    labs(y = ylab, title = title, x = "Days")
+
+  # Prepare data for output
+  data_post <- data_post %>%
+    mutate(timepoint = as.character(timepoint))
+  data <- bind_rows(data_post)
+
+  return(list(box_plot_post, wilcox_results, data)) # Return boxplot, Wilcoxon test results, and processed data
+}
+
+```
+
+```{r}
+count_clones_with_zeros <- function(data_expand, data_all, type, metric = "cum_freq", num_cuts = 5, group_by = c("PatientID","timepoint", "PTCy")){
+  #' @description Like count_clones(), but fills in num_clones = 0 for sample-timepoints
+  #' that exist in data_all (all clones) but have no rows in data_expand (zero
+  #' alloreactive-expanded clones), so the resulting sample size matches the
+  #' "# of Alloreactive Clones" figures (freq_Both_cd4/cd8) built from data_all.
+  #' @usage count_clones_with_zeros(data_expand, data_all, type, metric = "cum_freq", num_cuts = 5)
+  #' @return list(data_pre, data_post)
+
+  data_proc <- data_expand%>%
+    group_by(across(all_of(c(group_by, type))))%>%
+    dplyr::summarise(num_clones = sum(frequency), .groups = "keep")
+
+  data_pre <- data_proc[grepl("MLR|unstim", data_proc$timepoint),] #Seperate timepoints before transplant
+
+  data_proc <- data_proc %>%
+    mutate(timepoint = strtoi(timepoint))
+  data_proc <- data_proc[!is.na(data_proc$timepoint),]
+
+  data_post_expand <- data_proc[data_proc$timepoint <= 365 & data_proc$timepoint > 3,] %>%
+    subset(!is.na(timepoint))%>%
+    ungroup()
+
+  data_all_ref <- data_all %>%
+    select(all_of(c(group_by, type)))%>%
+    distinct()%>%
+    mutate(timepoint = strtoi(timepoint))
+  data_all_ref <- data_all_ref[!is.na(data_all_ref$timepoint) & data_all_ref$timepoint <= 365 & data_all_ref$timepoint > 3,]
+
+  breaks <- unique(quantile(data_all_ref$timepoint, probs = 0:num_cuts/num_cuts))
+
+  data_post <- data_all_ref %>%
+    dplyr::full_join(data_post_expand, by = c(group_by, type)) %>%
+    replace_na(list(num_clones = 0)) %>%
+    mutate(bins = cut(timepoint, breaks = breaks, include.lowest = TRUE)) %>%
+    ungroup()
+
+  return(list(data_pre, data_post))
+}
+
+num_clones_with_zeros <- function(data_expand, data_all, type, metric = "cum_freq", num_cuts = 5, title, ylab = "Allo Frequency", text_size = 20, group_by = c("PatientID", "timepoint", "PTCy"), pval_label = "p.adj.signif", pval_size = 8) {
+  #' @description Like num_clones(), but uses count_clones_with_zeros() so that
+  #' sample-timepoints with zero alloreactive-expanded clones are retained as
+  #' num_clones = 0 instead of being dropped.
+  #' @usage num_clones_with_zeros(data_expand, data_all, type, metric, num_cuts, title, ylab, text_size, group_by)
+  #' @return list(box_plot_post, wilcox_results, data)
+
+  results <- count_clones_with_zeros(data_expand, data_all, type, metric, num_cuts, group_by = group_by)
+  data_post <- results[[2]]
+  data_post$type_num <- as.numeric(factor(data_post[[type]]))
+
+  data_post_n0 <- data_post %>%
+    filter(num_clones != 0)
+
+  wilcox_results <- compare_means(as.formula(paste0("num_clones ~ ", type)), data = data_post, group.by = "bins")
+
+  stat_test <- data_post %>%
+    group_by(bins) %>%
+    pairwise_wilcox_test(as.formula(paste0("num_clones ~ ", type)), p.adjust.method = "hochberg") %>%
+    add_xy_position(x = "bins") %>%
+    mutate(
+      p.adj = p.adjust(p, method = "hochberg"),
+      p.adj.signif = symnum(
+        p.adj,
+        cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1),
+        symbols = c("****", "***", "**", "*", "ns")
+      ),
+      p.adj.exact = ifelse(p.adj < 0.001, sprintf("p = %.2e", p.adj), sprintf("p = %.3f", p.adj))
+    )
+
+  box_plot_post <- ggboxplot(data_post, x = "bins", y = "num_clones", fill = type) +
+    stat_pvalue_manual(stat_test, label = pval_label, tip.length = 0.01, step.increase = 0.00, bracket.nudge.y = -1, size = pval_size) +
+    geom_beeswarm(data = data_post_n0, position = "dodge", dodge.width = .75, na.rm = TRUE, aes(x = bins, y = num_clones, group = .data[[type]])) +
+    scale_y_continuous(trans = 'log10', labels = scales::number_format(accuracy = 0.0001), expand = expansion(mult = c(0.05, 0.15))) +
+    theme_pubr() +
+    theme(
+      text = element_text(size = text_size),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(color = "black"),
+      axis.ticks.length = unit(0.25, "cm"),
+      legend.text = element_markdown()
+    ) +
+    labs(y = ylab, title = title, x = "Days")
+
+  data_post <- data_post %>%
+    mutate(timepoint = as.character(timepoint))
+  data <- bind_rows(data_post)
+
+  return(list(box_plot_post, wilcox_results, data))
+}
+
+```
+
+```{r, warning=FALSE, fig.width=9.5, fig.height = 5}
+
+data_CD48_all_expand_adj <- data_CD48_all_expand
+data_CD48_all_expand_adj$cell_type <- gsub(" ", "",data_CD48_all_expand_adj$cell_type )
+data_CD48_all_expand_adj <- dplyr::full_join(data_CD48_all_expand_adj, clinical_data, by = "PatientID")
+data_CD48_all_expand_adj <- data_CD48_all_expand_adj%>%
+  mutate(GVHD_GRADE_1 = ifelse(grepl("Severe", GVHD_GRADE_1), "Severe", GVHD_GRADE_1))
+
+if(remove_pat_regx != ""){
+  data_CD48_all_expand_adj <- data_CD48_all_expand_adj[!grepl(remove_pat_regx,data_CD48_all_expand_adj$PatientID),]
+}
+
+data_CD48_all_expand_adj <- data_CD48_all_expand_adj%>%
+  mutate(GVHD_GRADE_1 = ifelse(grepl("No|Mild", GVHD_GRADE_1), "No/Mild", "Severe"))#%>%
+  #mutate(GVHD_GRADE_1 = factor(GVHD_GRADE_1, levels = c("No/Mild", "Severe")))
+
+type <- "GVHD_GRADE_1"
+
+
+# PRUNED (not a manuscript figure): result_NoPTCy <- num_clones(subset(data_CD48_all_expand_adj, data_CD48_all_expand_adj$PTCy == "No PTCy"), type, num_cuts = 4, title = "No PTCy No and Mild vs Severe", ylab = "Alloreactive \n Cumulative Frequency")
+# PRUNED (not a manuscript figure): NoPTCy <- result_NoPTCy[[1]]+
+# PRUNED (not a manuscript figure):   scale_fill_manual(name = "GVHD Grade", values=c("#058b8e", "#B85000"),
+# PRUNED (not a manuscript figure):                     labels = c(
+# PRUNED (not a manuscript figure):       `No/Mild` = "<span style='color:#058b8e;'>No/Mild</span>",
+# PRUNED (not a manuscript figure):       Severe = "<span style='color:#B85000;'>Severe</span>"))
+# PRUNED (not a manuscript figure): test_NoPTCy <- result_NoPTCy[[2]]
+
+# PRUNED (not a manuscript figure): result_PTCy <- num_clones(subset(data_CD48_all_expand_adj, data_CD48_all_expand_adj$PTCy == "PTCy"), type, num_cuts=4, title = "PTCy No and Mild vs Severe", ylab = "Alloreactive \n Cumulative Frequency")
+# PRUNED (not a manuscript figure): PTCy <- result_PTCy[[1]]+
+# PRUNED (not a manuscript figure):   scale_fill_manual(name = "GVHD Grade", values=c("#058b8e", "#B85000"),
+# PRUNED (not a manuscript figure):                     labels = c(
+# PRUNED (not a manuscript figure):       `No/Mild` = "<span style='color:#058b8e;'>No/Mild</span>",
+# PRUNED (not a manuscript figure):       Severe = "<span style='color:#B85000;'>Severe</span>"))
+# PRUNED (not a manuscript figure): test_PTCy <- result_PTCy[[2]]
+
+result_All_byPTCy <- num_clones(data_CD48_all_expand_adj, "PTCy", num_cuts = 4, title = "PTCy vs No PTCy", ylab = "Alloreactive \n Cumulative Frequency")
+All_byPTCy <- result_All_byPTCy[[1]]+
+    scale_fill_manual(values = c("#E6BE60", "#A483AF"),
+                    labels = c(
+      `No PTCy` = "<span style='color:#E6BE60;'>No PTCy</span>",
+      PTCy = "<span style='color:#A483AF;'>PTCy</span>"))
+test_All_byPTCy <- result_All_byPTCy[[2]]
+
+result_Grade_byPTCy <- num_clones(data_CD48_all_expand_adj, type, num_cuts = 4, title = "", ylab = "Alloreactive \n Cumulative Frequency")
+Grade_byPTCy <- result_Grade_byPTCy[[1]]+
+  scale_fill_manual(name = "GVHD Grade", values = c("#058b8e", "#B85000"),
+                    labels = c(
+      `No/Mild` = "<span style='color:#058b8e;'>No/Mild</span>",
+      Severe = "<span style='color:#B85000;'>Severe</span>"))
+test_Grade_byPTCy <- result_Grade_byPTCy[[2]]
+
+# Exact-p-value variant of Grade_byPTCy (for fig_EF_pval) -- does not alter the original figure
+result_Grade_byPTCy_pval <- num_clones(data_CD48_all_expand_adj, type, num_cuts = 4, title = "", ylab = "Alloreactive \n Cumulative Frequency", pval_label = "p.adj.exact", pval_size = 6)
+Grade_byPTCy_pval <- result_Grade_byPTCy_pval[[1]]+
+  scale_fill_manual(name = "GVHD Grade", values = c("#058b8e", "#B85000"),
+                    labels = c(
+      `No/Mild` = "<span style='color:#058b8e;'>No/Mild</span>",
+      Severe = "<span style='color:#B85000;'>Severe</span>"))
+
+data_CD48_all_expand_adj_CD4 <- data_CD48_all_expand_adj%>%
+  filter(grepl("CD4",cell_type) & !grepl("CD8", cell_type))
+
+data_CD48_all_expand_adj_CD8 <- data_CD48_all_expand_adj%>%
+  filter(!grepl("CD4",cell_type) & grepl("CD8", cell_type))
+
+# PRUNED (not a manuscript figure): result_Grade_byPTCy <- num_clones(data_CD48_all_expand_adj_CD4, type, num_cuts = 2, title = "GVHD Grade CD4+", ylab = "Alloreactive \n Cumulative Frequency")
+# PRUNED (not a manuscript figure): Grade_byPTCy_CD4 <- result_Grade_byPTCy[[1]]+
+# PRUNED (not a manuscript figure):   scale_fill_manual(name = "GVHD Grade", values = c("#058b8e", "#B85000"),
+# PRUNED (not a manuscript figure):                     labels = c(
+# PRUNED (not a manuscript figure):       `No/Mild` = "<span style='color:#058b8e;'>No/Mild</span>",
+# PRUNED (not a manuscript figure):       Severe = "<span style='color:#B85000;'>Severe</span>"))
+# PRUNED (not a manuscript figure): result_Grade_byPTCy <- num_clones(data_CD48_all_expand_adj_CD8, type, num_cuts = 2, title = "GVHD Grade CD8+", ylab = "Alloreactive \n Cumulative Frequency")
+# PRUNED (not a manuscript figure): Grade_byPTCy_CD8 <- result_Grade_byPTCy[[1]]+
+# PRUNED (not a manuscript figure):   scale_fill_manual(name = "GVHD Grade", values = c("#058b8e", "#B85000"),
+# PRUNED (not a manuscript figure):                     labels = c(
+# PRUNED (not a manuscript figure):       `No/Mild` = "<span style='color:#058b8e;'>No/Mild</span>",
+# PRUNED (not a manuscript figure):       Severe = "<span style='color:#B85000;'>Severe</span>"))
+
+# --- Corrected Grade_byPTCy_CD4/CD8: zero-fill sample-timepoints with no expanded
+# clones so N matches freq_Both_cd4/cd8GVHD_GRADE_1 (104/99) ---
+data_CD48_all_adj <- dplyr::full_join(data_CD48_all, clinical_data, by = "PatientID")
+data_CD48_all_adj <- data_CD48_all_adj[!is.na(data_CD48_all_adj$cdr3_amino_acid),] %>%
+  filter(strtoi(timepoint) > 3) %>%
+  mutate(GVHD_GRADE_1 = ifelse(grepl("Severe", GVHD_GRADE_1), "Severe", GVHD_GRADE_1)) %>%
+  mutate(GVHD_GRADE_1 = ifelse(grepl("No|Mild", GVHD_GRADE_1), "No/Mild", "Severe"))
+
+if(remove_pat_regx != ""){
+  data_CD48_all_adj <- data_CD48_all_adj[!grepl(remove_pat_regx,data_CD48_all_adj$PatientID),]
+}
+
+data_CD48_all_adj_CD4 <- data_CD48_all_adj %>% filter(grepl("CD4",cell_type) & !grepl("CD8", cell_type))
+data_CD48_all_adj_CD8 <- data_CD48_all_adj %>% filter(!grepl("CD4",cell_type) & grepl("CD8", cell_type))
+
+result_Grade_byPTCy_CD4 <- num_clones_with_zeros(data_CD48_all_expand_adj_CD4, data_CD48_all_adj_CD4, type, num_cuts = 2, title = "GVHD Grade CD4+", ylab = "Cumulative Frequency \n of Expanded Clones")
+Grade_byPTCy_CD4_corrected <- result_Grade_byPTCy_CD4[[1]]+
+  scale_fill_manual(name = "GVHD Grade", values = c("#058b8e", "#B85000"),
+                    labels = c(
+      `No/Mild` = "<span style='color:#058b8e;'>No/Mild</span>",
+      Severe = "<span style='color:#B85000;'>Severe</span>"))
+
+result_Grade_byPTCy_CD8 <- num_clones_with_zeros(data_CD48_all_expand_adj_CD8, data_CD48_all_adj_CD8, type, num_cuts = 2, title = "GVHD Grade CD8+", ylab = "Cumulative Frequency \n of Expanded Clones")
+Grade_byPTCy_CD8_corrected <- result_Grade_byPTCy_CD8[[1]]+
+  scale_fill_manual(name = "GVHD Grade", values = c("#058b8e", "#B85000"),
+                    labels = c(
+      `No/Mild` = "<span style='color:#058b8e;'>No/Mild</span>",
+      Severe = "<span style='color:#B85000;'>Severe</span>"))
+
+cat("Grade_byPTCy_CD4_corrected N =", nrow(result_Grade_byPTCy_CD4[[3]]), "\n")
+cat("Grade_byPTCy_CD8_corrected N =", nrow(result_Grade_byPTCy_CD8[[3]]), "\n")
+
+# --- Exact p-value versions of panels g/h ---
+result_Grade_byPTCy_CD4_pvalue <- num_clones_with_zeros(data_CD48_all_expand_adj_CD4, data_CD48_all_adj_CD4, type, num_cuts = 2, title = "GVHD Grade CD4+", ylab = "Cumulative Frequency \n of Expanded Clones", pval_label = "p.adj.exact", pval_size = 6)
+Grade_byPTCy_CD4_corrected_pvalue <- result_Grade_byPTCy_CD4_pvalue[[1]]+
+  scale_fill_manual(name = "GVHD Grade", values = c("#058b8e", "#B85000"),
+                    labels = c(
+      `No/Mild` = "<span style='color:#058b8e;'>No/Mild</span>",
+      Severe = "<span style='color:#B85000;'>Severe</span>"))
+
+result_Grade_byPTCy_CD8_pvalue <- num_clones_with_zeros(data_CD48_all_expand_adj_CD8, data_CD48_all_adj_CD8, type, num_cuts = 2, title = "GVHD Grade CD8+", ylab = "Cumulative Frequency \n of Expanded Clones", pval_label = "p.adj.exact", pval_size = 6)
+Grade_byPTCy_CD8_corrected_pvalue <- result_Grade_byPTCy_CD8_pvalue[[1]]+
+  scale_fill_manual(name = "GVHD Grade", values = c("#058b8e", "#B85000"),
+                    labels = c(
+      `No/Mild` = "<span style='color:#058b8e;'>No/Mild</span>",
+      Severe = "<span style='color:#B85000;'>Severe</span>"))
+
+plot(Grade_byPTCy_CD4_corrected_pvalue)
+plot(Grade_byPTCy_CD8_corrected_pvalue)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure1/Grade_byPTCy_CD4_corrected_pvalue',type,'.png'), Grade_byPTCy_CD4_corrected_pvalue, width = 9.5, height = 5, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1/Grade_byPTCy_CD8_corrected_pvalue',type,'.png'), Grade_byPTCy_CD8_corrected_pvalue, width = 9.5, height = 5, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1/Grade_byPTCy_CD4_corrected_pvalue',type,'.pdf'), Grade_byPTCy_CD4_corrected_pvalue, width = 9.5, height = 5, dpi = 600)
+tab_g_pv <- result_Grade_byPTCy_CD4_pvalue[[3]] %>% group_by(bins, .data[[type]]) %>% summarise(N = n(), .groups = "drop") %>% rename(group = !!type)
+make_sample_size_fig(tab_g_pv, "group", "Grade_byPTCy_CD4_corrected_pvalueGVHD_GRADE_1", grade2_colors, "Figure1", "Grade_byPTCy_CD4_corrected_pvalueGVHD_GRADE_1", bins_col = "bins")
+
+ggsave(paste0(OUTPUT_PATH, '/Figure1/Grade_byPTCy_CD8_corrected_pvalue',type,'.pdf'), Grade_byPTCy_CD8_corrected_pvalue, width = 9.5, height = 5, dpi = 600)
+tab_h_pv <- result_Grade_byPTCy_CD8_pvalue[[3]] %>% group_by(bins, .data[[type]]) %>% summarise(N = n(), .groups = "drop") %>% rename(group = !!type)
+make_sample_size_fig(tab_h_pv, "group", "Grade_byPTCy_CD8_corrected_pvalueGVHD_GRADE_1", grade2_colors, "Figure1", "Grade_byPTCy_CD8_corrected_pvalueGVHD_GRADE_1", bins_col = "bins")
+
+result_CD4_byPTCy <- num_clones(data_CD48_all_expand_adj_CD4, "PTCy", num_cuts = 4, title = "PTCy vs No PTCy CD4+", ylab = "Alloreactive \n Cumulative Frequency")
+CD4_byPTCy <- result_CD4_byPTCy[[1]]+
+    scale_fill_manual(values = c("#E6BE60", "#A483AF"),
+                    labels = c(
+      `No PTCy` = "<span style='color:#E6BE60;'>No PTCy</span>",
+      PTCy = "<span style='color:#A483AF;'>PTCy</span>"))
+
+
+result_CD8_byPTCy <- num_clones(data_CD48_all_expand_adj_CD8, "PTCy", num_cuts = 4, title = "PTCy vs No PTCy CD8+", ylab = "Alloreactive \n Cumulative Frequency")
+CD8_byPTCy <- result_CD8_byPTCy[[1]]+
+    scale_fill_manual(values = c("#E6BE60", "#A483AF"),
+                    labels = c(
+      `No PTCy` = "<span style='color:#E6BE60;'>No PTCy</span>",
+      PTCy = "<span style='color:#A483AF;'>PTCy</span>"))
+
+
+
+
+# PRUNED (intermediate component of Fig1e/1f, not its own manuscript panel; its standalone export was already pruned): plot(Grade_byPTCy)
+# PRUNED (not a manuscript figure): plot(Grade_byPTCy_CD4)
+# PRUNED (not a manuscript figure): plot(Grade_byPTCy_CD8)
+plot(Grade_byPTCy_CD4_corrected)
+plot(Grade_byPTCy_CD8_corrected)
+# PRUNED (not a manuscript figure): plot(NoPTCy)
+# PRUNED (not a manuscript figure): plot(PTCy)
+# MOVED to 05_figure3_annotation_variants.Rmd: plot(All_byPTCy)
+
+plot(CD4_byPTCy)
+plot(CD8_byPTCy)
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1/Grade_byPTCy',type,'.png'), Grade_byPTCy, width = 9.5, height = 5, dpi = 600)
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1/Grade_byPTCy_CD4',type,'.png'), Grade_byPTCy_CD4, width = 9.5, height = 5, dpi = 600)
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1/Grade_byPTCy_CD8',type,'.png'), Grade_byPTCy_CD8, width = 9.5, height = 5, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1/Grade_byPTCy_CD4_corrected',type,'.png'), Grade_byPTCy_CD4_corrected, width = 9.5, height = 5, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1/Grade_byPTCy_CD8_corrected',type,'.png'), Grade_byPTCy_CD8_corrected, width = 9.5, height = 5, dpi = 600)
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1ex/all_NoPTCy',type,'.png'), NoPTCy, width = 9.5, height = 5, dpi = 600)
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1ex/all_PTCy',type,'.png'), PTCy, width = 9.5, height = 5, dpi = 600)
+# MOVED to 05_figure3_annotation_variants.Rmd: ggsave(paste0(OUTPUT_PATH, '/Figure3/all_All_byPTCy.png'), All_byPTCy, width = 9.5, height = 5, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure3ex/CD4_byPTCy',type,'.png'), CD4_byPTCy, width = 9.5, height = 5, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure3ex/CD8_byPTCy',type,'.png'), CD8_byPTCy, width = 9.5, height = 5, dpi = 600)
+
+
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1/Grade_byPTCy',type,'.pdf'), Grade_byPTCy, width = 9.5, height = 5, dpi = 600)
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1/Grade_byPTCy_CD4',type,'.pdf'), Grade_byPTCy_CD4, width = 9.5, height = 5, dpi = 600)
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1/Grade_byPTCy_CD8',type,'.pdf'), Grade_byPTCy_CD8, width = 9.5, height = 5, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1/Grade_byPTCy_CD4_corrected',type,'.pdf'), Grade_byPTCy_CD4_corrected, width = 9.5, height = 5, dpi = 600)
+tab_g <- result_Grade_byPTCy_CD4[[3]] %>% group_by(bins, .data[[type]]) %>% summarise(N = n(), .groups = "drop") %>% rename(group = !!type)
+make_sample_size_fig(tab_g, "group", "Grade_byPTCy_CD4_correctedGVHD_GRADE_1", grade2_colors, "Figure1", "Grade_byPTCy_CD4_correctedGVHD_GRADE_1", bins_col = "bins")
+
+ggsave(paste0(OUTPUT_PATH, '/Figure1/Grade_byPTCy_CD8_corrected',type,'.pdf'), Grade_byPTCy_CD8_corrected, width = 9.5, height = 5, dpi = 600)
+tab_h <- result_Grade_byPTCy_CD8[[3]] %>% group_by(bins, .data[[type]]) %>% summarise(N = n(), .groups = "drop") %>% rename(group = !!type)
+make_sample_size_fig(tab_h, "group", "Grade_byPTCy_CD8_correctedGVHD_GRADE_1", grade2_colors, "Figure1", "Grade_byPTCy_CD8_correctedGVHD_GRADE_1", bins_col = "bins")
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1ex/all_NoPTCy',type,'.pdf'), NoPTCy, width = 9.5, height = 5, dpi = 600)
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1ex/all_PTCy',type,'.pdf'), PTCy, width = 9.5, height = 5, dpi = 600)
+# MOVED to 05_figure3_annotation_variants.Rmd: ggsave(paste0(OUTPUT_PATH, '/Figure3/all_All_byPTCy.pdf'), All_byPTCy, width = 9.5, height = 5, dpi = 600)
+# MOVED to 05_figure3_annotation_variants.Rmd: tab_2g <- result_All_byPTCy[[3]] %>% group_by(bins, PTCy) %>% summarise(N = n(), .groups = "drop")
+# MOVED to 05_figure3_annotation_variants.Rmd: make_sample_size_fig(tab_2g, "PTCy", "all_All_byPTCy", ptcy_colors, "Figure3", "all_All_byPTCy", bins_col = "bins")
+
+ggsave(paste0(OUTPUT_PATH, '/Figure3ex/CD4_byPTCy',type,'.pdf'), CD4_byPTCy, width = 9.5, height = 5, dpi = 600)
+tab_d_cd4 <- result_CD4_byPTCy[[3]] %>% group_by(bins, PTCy) %>% summarise(N = n(), .groups = "drop")
+make_sample_size_fig(tab_d_cd4, "PTCy", "CD4_byPTCyGVHD_GRADE_1", ptcy_colors, "Figure3ex", "CD4_byPTCyGVHD_GRADE_1", bins_col = "bins")
+
+ggsave(paste0(OUTPUT_PATH, '/Figure3ex/CD8_byPTCy',type,'.pdf'), CD8_byPTCy, width = 9.5, height = 5, dpi = 600)
+tab_d_cd8 <- result_CD8_byPTCy[[3]] %>% group_by(bins, PTCy) %>% summarise(N = n(), .groups = "drop")
+make_sample_size_fig(tab_d_cd8, "PTCy", "CD8_byPTCyGVHD_GRADE_1", ptcy_colors, "Figure3ex", "CD8_byPTCyGVHD_GRADE_1", bins_col = "bins")
+
+
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1/Grade_byPTCy',type,'.svg'), Grade_byPTCy, width = 9.5, height = 5, dpi = 600)
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1ex/all_NoPTCy',type,'.svg'), NoPTCy, width = 9.5, height = 5, dpi = 600)
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1/Grade_byPTCy_CD4',type,'.svg'), Grade_byPTCy_CD4, width = 9.5, height = 5, dpi = 600)
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1/Grade_byPTCy_CD8',type,'.svg'), Grade_byPTCy_CD8, width = 9.5, height = 5, dpi = 600)
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1ex/all_PTCy',type,'.svg'), PTCy, width = 9.5, height = 5, dpi = 600)
+# MOVED to 05_figure3_annotation_variants.Rmd: ggsave(paste0(OUTPUT_PATH, '/Figure3/all_All_byPTCy.svg'), All_byPTCy, width = 9.5, height = 5, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure3ex/CD4_byPTCy',type,'.svg'), CD4_byPTCy, width = 9.5, height = 5, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure3ex/CD8_byPTCy',type,'.svg'), CD8_byPTCy, width = 9.5, height = 5, dpi = 600)
+
+# --- Exact p-value versions of panel d (CD4_byPTCy/CD8_byPTCy) ---
+result_CD4_byPTCy_pvalue <- num_clones(data_CD48_all_expand_adj_CD4, "PTCy", num_cuts = 4, title = "PTCy vs No PTCy CD4+", ylab = "Alloreactive \n Cumulative Frequency", pval_label = "p.adj.exact", pval_size = 6)
+CD4_byPTCy_pvalue <- result_CD4_byPTCy_pvalue[[1]]+
+    scale_fill_manual(values = c("#E6BE60", "#A483AF"),
+                    labels = c(
+      `No PTCy` = "<span style='color:#E6BE60;'>No PTCy</span>",
+      PTCy = "<span style='color:#A483AF;'>PTCy</span>"))
+
+result_CD8_byPTCy_pvalue <- num_clones(data_CD48_all_expand_adj_CD8, "PTCy", num_cuts = 4, title = "PTCy vs No PTCy CD8+", ylab = "Alloreactive \n Cumulative Frequency", pval_label = "p.adj.exact", pval_size = 6)
+CD8_byPTCy_pvalue <- result_CD8_byPTCy_pvalue[[1]]+
+    scale_fill_manual(values = c("#E6BE60", "#A483AF"),
+                    labels = c(
+      `No PTCy` = "<span style='color:#E6BE60;'>No PTCy</span>",
+      PTCy = "<span style='color:#A483AF;'>PTCy</span>"))
+
+plot(CD4_byPTCy_pvalue)
+plot(CD8_byPTCy_pvalue)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure3ex/CD4_byPTCy_pvalue',type,'.png'), CD4_byPTCy_pvalue, width = 9.5, height = 5, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure3ex/CD8_byPTCy_pvalue',type,'.png'), CD8_byPTCy_pvalue, width = 9.5, height = 5, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure3ex/CD4_byPTCy_pvalue',type,'.pdf'), CD4_byPTCy_pvalue, width = 9.5, height = 5, dpi = 600)
+tab_d_cd4_pv <- result_CD4_byPTCy_pvalue[[3]] %>% group_by(bins, PTCy) %>% summarise(N = n(), .groups = "drop")
+make_sample_size_fig(tab_d_cd4_pv, "PTCy", "CD4_byPTCy_pvalueGVHD_GRADE_1", ptcy_colors, "Figure3ex", "CD4_byPTCy_pvalueGVHD_GRADE_1", bins_col = "bins")
+
+ggsave(paste0(OUTPUT_PATH, '/Figure3ex/CD8_byPTCy_pvalue',type,'.pdf'), CD8_byPTCy_pvalue, width = 9.5, height = 5, dpi = 600)
+tab_d_cd8_pv <- result_CD8_byPTCy_pvalue[[3]] %>% group_by(bins, PTCy) %>% summarise(N = n(), .groups = "drop")
+make_sample_size_fig(tab_d_cd8_pv, "PTCy", "CD8_byPTCy_pvalueGVHD_GRADE_1", ptcy_colors, "Figure3ex", "CD8_byPTCy_pvalueGVHD_GRADE_1", bins_col = "bins")
+```
+
+
+```{r nonallo-all-by-ptcy, warning=FALSE, fig.width=9.5, fig.height=5}
+
+# Non-alloreactive equivalent of all_All_byPTCy
+data_nonallo_expand_adj <- data_nonallo_squished_w0
+data_nonallo_expand_adj$cell_type <- gsub(" ", "", data_nonallo_expand_adj$cell_type)
+data_nonallo_expand_adj <- dplyr::full_join(data_nonallo_expand_adj, meta_data, by = "PatientID")
+data_nonallo_expand_adj <- data_nonallo_expand_adj %>%
+  mutate(GVHD_GRADE_1 = ifelse(grepl("Severe", GVHD_GRADE_1), "Severe", GVHD_GRADE_1))
+
+if (remove_pat_regx != "") {
+  data_nonallo_expand_adj <- data_nonallo_expand_adj[!grepl(remove_pat_regx, data_nonallo_expand_adj$PatientID), ]
+}
+#R070 kept (no longer filtered) for consistency with panel b (freq_Both_vio_ex), which also keeps R070
+
+data_nonallo_expand_adj <- data_nonallo_expand_adj %>%
+  mutate(GVHD_GRADE_1 = ifelse(grepl("No|Mild", GVHD_GRADE_1), "No/Mild", "Severe"))
+
+result_All_nonallo_byPTCy <- num_clones(data_nonallo_expand_adj, "PTCy", num_cuts = 4,
+                                        title = "PTCy vs No PTCy (Non-Alloreactive)",
+                                        ylab = "Non-Alloreactive \n Cumulative Frequency")
+All_nonallo_byPTCy <- result_All_nonallo_byPTCy[[1]] +
+  scale_fill_manual(values = c("#E6BE60", "#A483AF"),
+                    labels = c(
+                      `No PTCy` = "<span style='color:#E6BE60;'>No PTCy</span>",
+                      PTCy = "<span style='color:#A483AF;'>PTCy</span>"))
+test_All_nonallo_byPTCy <- result_All_nonallo_byPTCy[[2]]
+
+plot(All_nonallo_byPTCy)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure3/all_All_nonallo_byPTCy.png'), All_nonallo_byPTCy, width = 9.5, height = 5, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure3/all_All_nonallo_byPTCy.pdf'), All_nonallo_byPTCy, width = 9.5, height = 5, dpi = 600)
+tab_f <- result_All_nonallo_byPTCy[[3]] %>% group_by(bins, PTCy) %>% summarise(N = n(), .groups = "drop")
+make_sample_size_fig(tab_f, "PTCy", "all_All_nonallo_byPTCy", ptcy_colors, "Figure3", "all_All_nonallo_byPTCy", bins_col = "bins")
+ggsave(paste0(OUTPUT_PATH, '/Figure3/all_All_nonallo_byPTCy.svg'), All_nonallo_byPTCy, width = 9.5, height = 5, dpi = 600)
+
+# --- Exact p-value version of panel f (non-alloreactive cumulative frequency by PTCy) ---
+result_All_nonallo_byPTCy_pvalue <- num_clones(data_nonallo_expand_adj, "PTCy", num_cuts = 4,
+                                        title = "PTCy vs No PTCy (Non-Alloreactive)",
+                                        ylab = "Non-Alloreactive \n Cumulative Frequency",
+                                        pval_label = "p.adj.exact", pval_size = 6)
+All_nonallo_byPTCy_pvalue <- result_All_nonallo_byPTCy_pvalue[[1]] +
+  scale_fill_manual(values = c("#E6BE60", "#A483AF"),
+                    labels = c(
+                      `No PTCy` = "<span style='color:#E6BE60;'>No PTCy</span>",
+                      PTCy = "<span style='color:#A483AF;'>PTCy</span>"))
+
+plot(All_nonallo_byPTCy_pvalue)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure3/all_All_nonallo_byPTCy_pvalue.png'), All_nonallo_byPTCy_pvalue, width = 9.5, height = 5, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure3/all_All_nonallo_byPTCy_pvalue.pdf'), All_nonallo_byPTCy_pvalue, width = 9.5, height = 5, dpi = 600)
+tab_f_pv <- result_All_nonallo_byPTCy_pvalue[[3]] %>% group_by(bins, PTCy) %>% summarise(N = n(), .groups = "drop")
+make_sample_size_fig(tab_f_pv, "PTCy", "all_All_nonallo_byPTCy_pvalue", ptcy_colors, "Figure3", "all_All_nonallo_byPTCy_pvalue", bins_col = "bins")
+```
+
+
+
+```{r, warning=FALSE, fig.width=9.5, fig.height = 15}
+# fig_EF combines plots from notebook 02 and this notebook
+freq_Both_vio_ex <- readRDS(file.path(PROCESSED_DATA_PATH, "freq_Both_vio_ex.rds"))
+
+fig_EF <- plot_grid(freq_Both_vio_ex, Grade_byPTCy, All_by_grade_fig_ex, ncol = 1, align = "v")
+plot(fig_EF)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure1/fig_EF.pdf'), fig_EF, width = 9.5, height = 15, dpi = 600)
+# Sub-panels a/b confirmed to share identical N per bin (same patient set, different metric).
+# NOTE: must use result_Grade_byPTCy_pval, not result_Grade_byPTCy -- the latter is
+# reassigned by the CD4+/CD8+ panels further down (lines ~1245/1251) before this point,
+# so by now it holds the CD8+ subset's data, not panel e's (All clones) data.
+tab_figEF <- result_Grade_byPTCy_pval[[3]] %>% group_by(bins, .data[[type]]) %>% summarise(N = n(), .groups = "drop") %>% rename(group = !!type)
+make_sample_size_fig(tab_figEF, "group", "fig_EF", grade2_colors, "Figure1", "fig_EF", bins_col = "bins", h = 6)
+ggsave(paste0(OUTPUT_PATH, '/Figure1/fig_EF.png'), fig_EF, width = 9.5, height = 15, dpi = 600)
+
+# fig_EF_pval: same layout as fig_EF, but with exact p-values instead of significance stars
+freq_Both_vio_ex_pval <- readRDS(file.path(PROCESSED_DATA_PATH, "freq_Both_vio_ex_pval.rds"))
+
+fig_EF_pval <- plot_grid(freq_Both_vio_ex_pval, Grade_byPTCy_pval, All_by_grade_fig_ex, ncol = 1, align = "v")
+plot(fig_EF_pval)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure1/fig_EF_pval.pdf'), fig_EF_pval, width = 9.5, height = 15, dpi = 600)
+tab_figEF_pval <- result_Grade_byPTCy_pval[[3]] %>% group_by(bins, .data[[type]]) %>% summarise(N = n(), .groups = "drop") %>% rename(group = !!type)
+make_sample_size_fig(tab_figEF_pval, "group", "fig_EF_pval", grade2_colors, "Figure1", "fig_EF_pval", bins_col = "bins", h = 6)
+ggsave(paste0(OUTPUT_PATH, '/Figure1/fig_EF_pval.png'), fig_EF_pval, width = 9.5, height = 15, dpi = 600)
+
+```
+

@@ -1,0 +1,342 @@
+#### Basis Hydrophobicity (pos 5-13) and CDR3 Length Figures
+
+```{r setup, include=FALSE}
+gc()
+rm(list = ls())
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries}
+library(data.table)
+library(ggplot2)
+library(ggpubr)
+library(dplyr)
+library(knitr)
+```
+
+```{r load-data}
+# NewClustering.csv contains CDR3 sequences with basis scores 1-10 and GVHD grades
+dt <- fread(
+  "Inputs/NewClustering.csv",
+  select = c("tag", "cdr3_amino_acid", "v_resolved", "j_resolved",
+             "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+             "GVHD_GRADE_1", "PTCy", "cell_type", "PatientID", "DonorType", "Onset")
+)
+
+hydrophobicity_chart <- read.csv(
+  "Inputs/HydrophobicityScale.csv"
+)
+
+setnames(dt, c("cdr3_amino_acid", "v_resolved", "j_resolved"), c("CDR3", "Vgene", "Jgene"))
+dt[, gene := "TRB"]
+
+# Fix two patients' GVHD grade
+dt[PatientID %in% c("R067", "R160"), GVHD_GRADE_1 := "Mild"]
+```
+
+```{r build-dt-b}
+new_thresholds <- c(
+  "1" = 0.055255063,
+  "2" = 0.13975275,
+  "3" = 0.060886793,
+  "4" = 0.09434857,
+  "5" = 0.2077952,
+  "6" = 0.06637823,
+  "7" = 0.050072215,
+  "8" = 0.13079754,
+  "9" = 0.06395816,
+  "10" = 0.066668764
+)
+
+create_cluster_subset <- function(dt, basis) {
+  basis <- as.character(basis)
+  threshold <- new_thresholds[basis]
+  subset_dt <- dt[dt[[basis]] > threshold,
+                  .(CDR3, Vgene, Jgene, gene = "TRB", score = get(basis), PatientID)]
+  return(unique(subset_dt))
+}
+
+dt_b <- vector("list", 10)
+for (i in 1:10) {
+  dt_b[[i]] <- create_cluster_subset(dt, i)
+}
+```
+
+```{r hydrophobicity-function}
+calculate_hydrophobicity <- function(cdr3_string, hydrophobicity_table) {
+  cdr3_string <- as.character(cdr3_string)
+  vals <- hydrophobicity_table$Hydrophobicity[
+    match(strsplit(cdr3_string, NULL)[[1]], hydrophobicity_table$AA)
+  ]
+  vals <- vals[!is.na(vals)]
+  if (length(vals) > 0) mean(vals) else NA
+}
+
+calculate_hydrophobicity_for_positions <- function(strings, hydrophobicity_table) {
+  sapply(strings, function(string) {
+    string <- as.character(string)
+    if (nchar(string) < 13) return(NA)
+    calculate_hydrophobicity(substring(string, 5, 13), hydrophobicity_table)
+  })
+}
+```
+
+```{r figure-d-hydrophobicity-by-basis}
+# Build per-basis hydrophobicity (pos 5-13) for b1, b2, b4, b7, b8, b9
+motif_hydrophobicity <- list(
+  b1 = calculate_hydrophobicity_for_positions(dt_b[[1]]$CDR3, hydrophobicity_chart),
+  b2 = calculate_hydrophobicity_for_positions(dt_b[[2]]$CDR3, hydrophobicity_chart),
+  b4 = calculate_hydrophobicity_for_positions(dt_b[[4]]$CDR3, hydrophobicity_chart),
+  b7 = calculate_hydrophobicity_for_positions(dt_b[[7]]$CDR3, hydrophobicity_chart),
+  b8 = calculate_hydrophobicity_for_positions(dt_b[[8]]$CDR3, hydrophobicity_chart),
+  b9 = calculate_hydrophobicity_for_positions(dt_b[[9]]$CDR3, hydrophobicity_chart)
+)
+
+combined_hydrophobicity <- data.frame(
+  Segment      = rep(names(motif_hydrophobicity), sapply(motif_hydrophobicity, length)),
+  Hydrophobicity = unlist(motif_hydrophobicity, use.names = FALSE)
+)
+combined_hydrophobicity <- combined_hydrophobicity[!is.na(combined_hydrophobicity$Hydrophobicity), ]
+
+combined_hydrophobicity_grouped <- combined_hydrophobicity %>%
+  mutate(BasisGroup = case_when(
+    Segment %in% c("b4", "b8") ~ "no_basis",
+    Segment %in% c("b1")       ~ "mild_basis",
+    Segment %in% c("b2", "b7", "b9") ~ "severe_basis"
+  ))
+
+combined_hydrophobicity_grouped$BasisGroup <- factor(
+  combined_hydrophobicity_grouped$BasisGroup,
+  levels = c("no_basis", "mild_basis", "severe_basis")
+)
+
+p_hydro_basis <- ggplot(combined_hydrophobicity_grouped,
+                        aes(x = BasisGroup, y = Hydrophobicity, fill = BasisGroup)) +
+  geom_violin(width = 0.4, alpha = 0.7) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, color = "black", lwd = 0.3) +
+  labs(
+    title = "Hydrophobicity\n(Positions 5-13)",
+    x = "Basis",
+    y = "Hydrophobicity score"
+  ) +
+  theme_pubr(base_size = 8.5) +
+  scale_fill_manual(values = c(
+    "severe_basis" = "#B85000",
+    "mild_basis"   = "#005A8F",
+    "no_basis"     = "#09BB8C"
+  )) +
+  stat_compare_means(
+    method = "wilcox.test",
+    comparisons = list(
+      c("severe_basis", "mild_basis"),
+      c("severe_basis", "no_basis"),
+      c("mild_basis",   "no_basis")
+    ),
+    label = "p.signif",
+    p.adjust.method = "holm",
+    size = 2.5
+  ) +
+  scale_x_discrete(limits = c("no_basis", "mild_basis", "severe_basis")) +
+  coord_cartesian(xlim = c(0.9, 3.3)) +
+  theme(
+    plot.title       = element_text(size = 8.5, hjust = 0.5),
+    axis.title.x     = element_text(size = 8),
+    axis.title.y     = element_text(size = 8),
+    axis.text        = element_text(size = 7.5),
+    legend.position  = "none",
+    axis.ticks.length = unit(0.015, "cm"),
+    plot.margin      = margin(1, 1, 1, 1)
+  )
+
+print(p_hydro_basis)
+```
+
+```{r table-d-hydrophobicity-by-basis}
+# Pairwise Wilcoxon p-values (Holm-adjusted)
+groups <- levels(combined_hydrophobicity_grouped$BasisGroup)
+pairs  <- combn(groups, 2, simplify = FALSE)
+pwilcox <- sapply(pairs, function(g) {
+  x <- combined_hydrophobicity_grouped$Hydrophobicity[combined_hydrophobicity_grouped$BasisGroup == g[1]]
+  y <- combined_hydrophobicity_grouped$Hydrophobicity[combined_hydrophobicity_grouped$BasisGroup == g[2]]
+  wilcox.test(x, y)$p.value
+})
+p_adj <- p.adjust(pwilcox, method = "holm")
+
+# Summary statistics per group
+hydro_summary <- combined_hydrophobicity_grouped %>%
+  group_by(Group = BasisGroup) %>%
+  summarize(
+    N      = n(),
+    Median = round(median(Hydrophobicity, na.rm = TRUE), 3),
+    SD     = round(sd(Hydrophobicity,     na.rm = TRUE), 3),
+    .groups = "drop"
+  )
+
+# Pairwise comparison table with % difference in medians
+medians <- setNames(hydro_summary$Median, hydro_summary$Group)
+hydro_pairs <- data.frame(
+  Comparison       = sapply(pairs, function(g) paste(g[1], "vs", g[2])),
+  Median_G1        = sapply(pairs, function(g) medians[g[1]]),
+  Median_G2        = sapply(pairs, function(g) medians[g[2]]),
+  Pct_Diff         = sapply(pairs, function(g) {
+    round((medians[g[2]] - medians[g[1]]) / abs(medians[g[1]]) * 100, 1)
+  }),
+  P_value          = signif(pwilcox, 3),
+  P_adj_Holm       = signif(p_adj,   3)
+)
+
+kable(hydro_summary, caption = "Figure d — Hydrophobicity (pos 5-13) summary by basis group")
+kable(hydro_pairs,   caption = "Figure d — Pairwise comparisons: % difference = (G2 - G1) / |G1| × 100")
+```
+
+```{r figure-e-cdr3-length-severe-vs-mildno}
+# Build CDR3 length dataframe grouped by basis severity
+length_severe <- c(nchar(dt_b[[2]]$CDR3), nchar(dt_b[[7]]$CDR3), nchar(dt_b[[9]]$CDR3))
+length_mild   <- nchar(dt_b[[1]]$CDR3)
+length_no     <- c(nchar(dt_b[[4]]$CDR3), nchar(dt_b[[8]]$CDR3))
+
+lengths <- data.frame(
+  length = c(length_severe, length_mild, length_no),
+  Basis  = factor(rep(c("Severe", "Mild", "No"),
+                      times = c(length(length_severe), length(length_mild), length(length_no))))
+)
+
+# Merge Mild and No into one group
+lengths <- lengths %>%
+  mutate(Group = ifelse(Basis %in% c("No", "Mild"), "Mild/No", "Severe"))
+
+lengths$Group <- factor(lengths$Group, levels = c("Mild/No", "Severe"))
+
+p_cdr3_length <- ggplot(lengths, aes(x = Group, y = length, fill = Group)) +
+  geom_boxplot(width = 0.5) +
+  labs(
+    title = "CDR3 Lengths: Severe vs Mild/No",
+    x = "Group",
+    y = "CDR3 length (aa)"
+  ) +
+  theme_pubr(base_size = 8.5) +
+  scale_fill_manual(values = c("Severe" = "#B85000", "Mild/No" = "#058B8E")) +
+  stat_compare_means(
+    method = "wilcox.test",
+    comparisons = list(c("Severe", "Mild/No")),
+    label = "p.signif",
+    p.adjust.method = "holm",
+    size = 2.5,
+    vjust = -0.5
+  ) +
+  coord_cartesian(ylim = c(min(lengths$length), max(lengths$length) * 1.1)) +
+  theme(
+    plot.title        = element_text(size = 7.5, hjust = 0.5, face = "bold"),
+    axis.title.x      = element_text(size = 7.5),
+    axis.title.y      = element_text(size = 7.5),
+    axis.text         = element_text(size = 7),
+    legend.position   = "none",
+    axis.ticks.length = unit(0.15, "cm"),
+    plot.margin       = margin(4, 4, 4, 4)
+  )
+
+print(p_cdr3_length)
+```
+
+```{r table-e-cdr3-length-severe-vs-mildno}
+# Summary statistics per group
+length_summary <- lengths %>%
+  group_by(Group) %>%
+  summarize(
+    N      = n(),
+    Median = round(median(length, na.rm = TRUE), 1),
+    SD     = round(sd(length,     na.rm = TRUE), 3),
+    .groups = "drop"
+  )
+
+# Wilcoxon test + % difference in medians
+wt <- wilcox.test(length ~ Group, data = lengths)
+med_mildno <- length_summary$Median[length_summary$Group == "Mild/No"]
+med_severe <- length_summary$Median[length_summary$Group == "Severe"]
+pct_diff   <- round((med_severe - med_mildno) / abs(med_mildno) * 100, 1)
+
+length_pairs <- data.frame(
+  Comparison  = "Mild/No vs Severe",
+  Median_MildNo = med_mildno,
+  Median_Severe = med_severe,
+  Pct_Diff    = pct_diff,
+  P_value     = signif(wt$p.value, 3)
+)
+
+kable(length_summary, caption = "Figure e — CDR3 length (aa) summary by group")
+kable(length_pairs,   caption = "Figure e — Comparison: % difference = (Severe - Mild/No) / |Mild/No| × 100")
+```
+
+```{r save-figures, eval=FALSE}
+data_dir <- "/Users/lingtingshi/Documents/GVHD_project/CDR3_amino_acid_analysis"
+ggsave(file.path(data_dir, "Basis_Hydrophobicity_5-13.png"),
+       p_hydro_basis,   width = 3, height = 2, dpi = 300, units = "in")
+ggsave(file.path(data_dir, "CDR3_boxplot.png"),
+       p_cdr3_length,   width = 2, height = 2, dpi = 300, units = "in")
+```
+
+
+#### Running Hydrophobicity on ALLOREACTIVE CLONES
+
+```{r load-allclones}
+allclones <- fread(
+  "Inputs/AllClones_all.csv",
+  select = c("cdr3_amino_acid", "v_resolved", "j_resolved", "type", "GVHD_GRADE_1", "GVHD_GRADE_2", "PatientID")
+)
+setnames(allclones, c("cdr3_amino_acid", "v_resolved", "j_resolved"), c("CDR3", "Vgene", "Jgene"))
+
+alloreactive_clones <- allclones %>%
+  filter(type == "allo") %>%
+  distinct(CDR3, Vgene, Jgene, .keep_all = TRUE)
+
+alloreactive_clones$Hydrophobicity_5_13 <- calculate_hydrophobicity_for_positions(
+  alloreactive_clones$CDR3,
+  hydrophobicity_table = hydrophobicity_chart
+)
+```
+
+```{r figure-f-hydrophobicity-alloreactive}
+grades_to_keep <- c("No", "Mild", "Severe")
+
+alloreactive_clones_clean <- alloreactive_clones %>%
+  filter(!is.na(Hydrophobicity_5_13)) %>%
+  filter(GVHD_GRADE_1 %in% grades_to_keep) %>%
+  mutate(GVHD_GRADE_1 = factor(GVHD_GRADE_1, levels = grades_to_keep))
+
+# Define pairwise comparisons (Wilcoxon)
+comparisons <- combn(grades_to_keep, 2, simplify = FALSE)
+
+pp2 <- ggplot(alloreactive_clones_clean,
+              aes(x = GVHD_GRADE_1, y = Hydrophobicity_5_13, fill = GVHD_GRADE_1)) +
+  geom_violin(width = 0.35, trim = FALSE) +
+  geom_boxplot(width = 0.15, outlier.shape = NA,
+               color = "black") +
+  labs(
+    title = "Hydrophobicity (AA 5-13) in Alloreactive Clones\nby GVHD Grade",
+    x = "GVHD Grade",
+    y = "Hydrophobicity Score"
+  ) +
+  theme_pubr() +
+  scale_fill_manual(values = c(
+    "No"     = "#09BB8C",
+    "Mild"   = "#005A8F",
+    "Severe" = "#B85000"
+  )) +
+  theme(
+    plot.title       = element_text(size = 8,  hjust = 0.5),
+    axis.title.x     = element_text(size = 7),
+    axis.title.y     = element_text(size = 7),
+    axis.text        = element_text(size = 6),
+    legend.position  = "none",
+    axis.ticks.length = unit(0.01, "cm")
+  ) +
+  stat_compare_means(
+    method = "wilcox.test",
+    comparisons = comparisons,
+    label = "p.signif",
+    p.adjust.method = "holm",
+    size = 3
+  )
+
+print(pp2)
+```

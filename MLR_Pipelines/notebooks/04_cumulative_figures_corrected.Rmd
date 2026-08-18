@@ -1,0 +1,892 @@
+---
+title: "04 - Cumulative Figures"
+output: html_document
+---
+
+```{r setup}
+source(file.path(dirname(getwd()), "config", "config.R"))
+# R098 expansion-cutoff fix (00_data_loading_corrected.Rmd) writes to
+# data/processed_corrected/, not data/processed/ -- read from there so
+# data_CD48_all / data_CD48_all_expand reflect the corrected Patient_098 cutoff.
+PROCESSED_DATA_PATH <- file.path(FIGURE_1_2_DIR, "data/processed_corrected")
+source(file.path(dirname(getwd()), "functions", "mlr_functions.R"))
+
+# Load data from previous notebooks
+data <- readRDS(file.path(PROCESSED_DATA_PATH, "patient_data_all.rds"))
+data_allo <- readRDS(file.path(PROCESSED_DATA_PATH, "patient_data_allo.rds"))
+data_nonallo <- readRDS(file.path(PROCESSED_DATA_PATH, "data_nonallo_list.rds"))
+data_meta <- readRDS(file.path(PROCESSED_DATA_PATH, "data_meta.rds"))
+all_full_allo <- readRDS(file.path(PROCESSED_DATA_PATH, "all_full_allo.rds"))
+filenames <- readRDS(file.path(PROCESSED_DATA_PATH, "filenames.rds"))
+clinical_data <- readRDS(file.path(PROCESSED_DATA_PATH, "clinical_data_full.rds"))
+data_squished <- readRDS(file.path(PROCESSED_DATA_PATH, "data_squished.rds"))
+data_squished_w0 <- readRDS(file.path(PROCESSED_DATA_PATH, "data_squished_w0.rds"))
+data_allo_squished <- readRDS(file.path(PROCESSED_DATA_PATH, "data_allo_squished.rds"))
+data_allo_squished_w0 <- readRDS(file.path(PROCESSED_DATA_PATH, "data_allo_squished_w0.rds"))
+data_nonallo_squished <- readRDS(file.path(PROCESSED_DATA_PATH, "data_nonallo_squished.rds"))
+data_nonallo_squished_w0 <- readRDS(file.path(PROCESSED_DATA_PATH, "data_nonallo_squished_w0.rds"))
+meta_data_clin <- readRDS(file.path(PROCESSED_DATA_PATH, "meta_data_clin.rds"))
+meta_data <- readRDS(file.path(PROCESSED_DATA_PATH, "meta_data.rds"))
+expanded_clones <- readRDS(file.path(PROCESSED_DATA_PATH, "expanded_clones.rds"))
+data_CD48_all <- readRDS(file.path(PROCESSED_DATA_PATH, "data_CD48_all.rds"))
+data_CD48_all_expand <- readRDS(file.path(PROCESSED_DATA_PATH, "data_CD48_all_expand.rds"))
+# patient_data_all_df.rds/data_squished_time.rds/patient_data_all_2.rds/
+# data_all_squished_proc.rds are produced only by notebook 01 (no corrected
+# counterpart), so they live in the original data/processed/, not
+# data/processed_corrected/.
+patient_data_all <- readRDS(file.path(FIGURE_1_2_DIR, "data/processed", "patient_data_all_df.rds"))
+data_squished_time <- readRDS(file.path(FIGURE_1_2_DIR, "data/processed", "data_squished_time.rds"))
+patient_data_all_2 <- readRDS(file.path(FIGURE_1_2_DIR, "data/processed", "patient_data_all_2.rds"))
+unique_identifiers <- c("cdr3_amino_acid", "v_resolved", "j_resolved")
+remove_pat_regx <- ""  # set to e.g. "067|070" to exclude patients
+data_all_squished  <- readRDS(file.path(FIGURE_1_2_DIR, "data/processed", "data_all_squished_proc.rds"))
+all_rep_div        <- readRDS(file.path(PROCESSED_DATA_PATH, "all_rep_div.rds"))
+all_allo_div       <- readRDS(file.path(PROCESSED_DATA_PATH, "all_allo_div.rds"))
+all_allo_div_CD4   <- readRDS(file.path(PROCESSED_DATA_PATH, "all_allo_div_CD4.rds"))
+all_allo_div_CD8   <- readRDS(file.path(PROCESSED_DATA_PATH, "all_allo_div_CD8.rds"))
+all_nonallo_div    <- readRDS(file.path(PROCESSED_DATA_PATH, "all_nonallo_div.rds"))
+all_nonallo_div_CD4 <- readRDS(file.path(PROCESSED_DATA_PATH, "all_nonallo_div_CD4.rds"))
+all_nonallo_div_CD8 <- readRDS(file.path(PROCESSED_DATA_PATH, "all_nonallo_div_CD8.rds"))
+
+#' Build and save a sample-size companion bar chart next to an existing figure.
+make_sample_size_fig <- function(tab, group_col, title, colors, save_dir, basename, bins_col = NULL, w = 7, h = 5) {
+  total_n <- sum(tab$N)
+  if (is.null(bins_col)) {
+    p <- ggplot(tab, aes(x = .data[[group_col]], y = N, fill = .data[[group_col]])) +
+      geom_col(width = 0.6) +
+      geom_text(aes(label = N), vjust = -0.3, size = 5) +
+      theme_bw(base_size = 13) + theme(legend.position = "none")
+  } else {
+    p <- ggplot(tab, aes(x = .data[[bins_col]], y = N, fill = .data[[group_col]])) +
+      geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+      geom_text(aes(label = N), position = position_dodge(width = 0.8), vjust = -0.3, size = 3.5) +
+      theme_bw(base_size = 12) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    w <- max(w, 8)
+  }
+  p <- p + scale_fill_manual(values = colors) +
+    labs(title = paste0(title, " - Sample Sizes (Total N = ", total_n, ")"), y = "N")
+  ggsave(file.path(OUTPUT_PATH, save_dir, paste0(basename, "_sample_size.png")), p, width = w, height = h, dpi = 300)
+  ggsave(file.path(OUTPUT_PATH, save_dir, paste0(basename, "_sample_size.pdf")), p, width = w, height = h, dpi = 300)
+  invisible(p)
+}
+grade3_colors <- c("No" = "#09BB8C", "Mild" = "#005A8F", "Severe" = "#B85000", "Unclassified/Severe" = "grey50")
+grade2_colors <- c("No and Mild" = "#058b8e", "Severe" = "#B85000")
+ptcy_colors   <- c("No PTCy" = "#E6BE60", "PTCy" = "#A483AF")
+```
+
+```{r}
+div_clones <- function(data, type, div_metric = "shannons.entropy", num_cuts = 5){
+  #' Divide clones based on timepoints and diversity metric
+  #'
+  #' @description This function processes a dataset of clones to divide it into pre- and post-stimulation data based on specific timepoints. The function filters and bins data to analyze clonal diversity using a specified diversity metric.
+  #'
+  #' @param data A dataframe containing clone data, including a `SampleID` column which indicates timepoints or conditions.
+  #' @param type A character string specifying the type of analysis or dataset being processed.
+  #' @param div_metric A character string specifying the diversity metric to use (default is "shannons.entropy").
+  #' @param num_cuts An integer indicating the number of bins to divide the timepoints into (default is 5).
+  #' @usage div_clones(data, type, div_metric, num_cuts)
+  #' @return A list containing two dataframes: `data_pre` for pre-stimulation and `data_post` for post-stimulation data.
+
+  data_pre <- data[grepl("MLR|unstim", data$SampleID),]%>%
+    dplyr::mutate(timepoint = SampleID) # Filter for pre-stimulation samples and mutate timepoint to be the same as SampleID
+
+  data_proc <- data %>%
+    dplyr::mutate(timepoint = strtoi(SampleID)) # Convert SampleID to an integer timepoint for processing
+  data_proc <- data_proc[!is.na(data_proc$timepoint),] # Remove any rows where timepoint conversion was not possible (NA values)
+
+  data_post <- data_proc[data_proc$timepoint <= 365 & data_proc$timepoint > 3,] %>%
+    ungroup() %>%
+    dplyr::mutate(bins = cut(timepoint, breaks = unique(quantile(timepoint, probs = 0:num_cuts/num_cuts)), include.lowest = TRUE)) # Filter for post-stimulation samples within a year and create bins based on timepoints
+
+  return(list(data_pre, data_post)) # Return a list containing pre- and post-stimulation dataframes
+}
+
+
+div_cut <- function(data, type, div_metric = "shannons.entropy", num_cuts = 5, text_size = 20, ylab = "", title = "", pval_label = "p.adj.signif", pval_size = 8){
+  #' Analyze diversity metrics and visualize results
+  #'
+  #' @description This function calculates diversity metrics for different bins of timepoints, performs pairwise Wilcoxon tests, and visualizes the results using boxplots with significance annotations.
+  #'
+  #' @param data A dataframe containing clone data, including a `SampleID` column.
+  #' @param type A character string specifying the grouping variable for the analysis.
+  #' @param div_metric A character string specifying the diversity metric to use (default is "shannons.entropy").
+  #' @param num_cuts An integer indicating the number of bins to divide the timepoints into (default is 5).
+  #' @param text_size An integer specifying the size of text in the plot (default is 20).
+  #' @param ylab A character string for the y-axis label in the plot.
+  #' @param title A character string for the plot title.
+  #' @usage div_cut(data, type, div_metric, num_cuts, text_size, ylab, title)
+  #' @return A list containing the boxplot with significance annotations, the Wilcoxon test results, and the processed data.
+
+  results <- div_clones(data, type, div_metric, num_cuts)
+  data_pre <- results[[1]]
+  data_post <- results[[2]]
+
+  print(unique(data_pre[[type]])) # Print unique values of the grouping variable in pre-stimulation data
+
+  # Summarize post-stimulation data by bins and grouping variable
+  data_post_sum <- data_post %>%
+    group_by(across(all_of(c("bins", type)))) %>%
+    summarise(n_each = n())
+
+  # Perform pairwise Wilcoxon test and add positions for significance annotations.
+  # Note: pairwise_wilcox_test() corrects within each bin-group, which is a no-op
+  # here since each bin has only one comparison (No/Mild vs Severe). The real
+  # multiple-comparisons correction across bins happens in the global p.adjust()
+  # step below, mirroring num_clones()/num_clone_fig()'s correction pattern.
+  stat_test <- data_post %>%
+    group_by(bins) %>%
+    pairwise_wilcox_test(as.formula(paste0(div_metric, " ~ ", type)), p.adjust.method = "hochberg") %>%
+    rstatix::add_xy_position(x = "bins") %>%
+    ungroup() %>%
+    mutate(
+      p.adj = p.adjust(p, method = "hochberg"),
+      p.adj.signif = symnum(
+        p.adj,
+        cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1),
+        symbols = c("****", "***", "**", "*", "ns")
+      ),
+      p.adj.exact = ifelse(p.adj < 0.001, sprintf("p = %.2e", p.adj), sprintf("p = %.3f", p.adj))
+    )
+
+  # Create boxplot with beeswarm overlay and significance annotations
+  box_plot_post <- ggboxplot(data_post, x = "bins", y = div_metric, fill = type, outlier.shape = NA) +
+    stat_pvalue_manual(stat_test, label = pval_label, tip.length = 0.01, step.increase = 0.001, size = pval_size) +
+    geom_beeswarm(position = "dodge", dodge.width = .75, aes(group = .data[[type]])) +
+    scale_y_continuous(labels = scales::number_format(accuracy = 1), expand = expansion(mult = c(0.05, 0.3)))+
+    theme_pubr() +
+    theme(
+      legend.text = element_markdown(),
+      text = element_text(size = text_size),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(color = "black"),
+      axis.ticks = element_blank(),
+      axis.ticks.length = unit(0.25, "cm")
+    ) +
+    labs(y = ylab, title = title)
+
+  return(list(box_plot_post, stat_test, data_post)) # Return boxplot, statistical test results, and processed post-stimulation data
+}
+
+```
+
+```{r, warning=FALSE, fig.width=8, fig.height = 4}
+
+patient_data_allo_copy <- patient_data_all[patient_data_all$Rep_div == "allo", ]
+
+patient_data_all_clinic <- dplyr::full_join(patient_data_allo_copy, meta_data_clin, by = "PatientID")%>%
+  try(mutate(PTCy = PTCy.x))%>%
+  try(select(-c(PTCy.x, PTCy.y)))%>%
+  mutate(GVHD_GRADE_1 = ifelse(grepl("Severe", GVHD_GRADE_1), "Severe", "No and Mild"))%>%
+  mutate(GVHD_GRADE_1 = factor(GVHD_GRADE_1, levels = c("No and Mild", "Severe")))
+patient_data_all_clinic <- patient_data_all_clinic[patient_data_all_clinic$GVHD_GRADE_1 != "Unclassified/Severe",]
+patient_data_all_clinic <- patient_data_all_clinic[!is.na(patient_data_all_clinic$slope),]
+
+if(remove_pat_regx != ""){
+  patient_data_all_clinic <- patient_data_all_clinic[!grepl(remove_pat_regx,patient_data_all_clinic$PatientID),]
+}
+
+
+type <- "GVHD_GRADE_1"
+
+
+# PRUNED (not a manuscript figure): result_Both <- div_cut(patient_data_all_clinic, type, num_cuts = 4, div_metric ="shannons.diversity" , ylab = "Shannon's Diversity",)
+# PRUNED (not a manuscript figure): Both <- result_Both[[1]]+
+# PRUNED (not a manuscript figure):   scale_fill_manual(name = "GVHD Grade", values = c("#058b8e", "#B85000", "grey"),
+# PRUNED (not a manuscript figure):                     labels = c(
+# PRUNED (not a manuscript figure):       `No and Mild` = "<span style='color:#058b8e;'>No and Mild</span>",
+# PRUNED (not a manuscript figure):       Severe = "<span style='color:#B85000;'>Severe</span>"))+
+# PRUNED (not a manuscript figure):   labs(x = "Days", title = "No and Mild vs Severe")
+# PRUNED (not a manuscript figure): test_BothPTCy <- result_Both[[2]]
+
+
+# PRUNED (not a manuscript figure): result_NoPTCy <- div_cut(subset(patient_data_all_clinic, patient_data_all_clinic$PTCy == "No PTCy"), type, num_cuts = 4, div_metric ="shannons.diversity" , ylab = "Shannon's Diversity",)
+# PRUNED (not a manuscript figure): NoPTCy <- result_NoPTCy[[1]]+
+# PRUNED (not a manuscript figure):   scale_fill_manual(name = "GVHD Grade",values = c("#058b8e", "#B85000", "grey"),
+# PRUNED (not a manuscript figure):                     labels = c(
+# PRUNED (not a manuscript figure):       `No and Mild` = "<span style='color:#058b8e;'>No and Mild</span>",
+# PRUNED (not a manuscript figure):       Severe = "<span style='color:#B85000;'>Severe</span>"))+
+# PRUNED (not a manuscript figure):   labs(x = "Days", title = "No PTCy: No and Mild vs Severe")
+# PRUNED (not a manuscript figure): test_NoPTCy <- result_NoPTCy[[2]]
+
+
+# PRUNED (not a manuscript figure): result_PTCy <- div_cut(subset(patient_data_all_clinic, patient_data_all_clinic$PTCy == "PTCy"), type, num_cuts = 4, div_metric ="shannons.diversity" , ylab = "Shannon's Diversity",)
+# PRUNED (not a manuscript figure): PTCy <- result_PTCy[[1]]+
+# PRUNED (not a manuscript figure):   scale_fill_manual(name = "GVHD Grade", values = c("#058b8e", "#B85000", "grey"),
+# PRUNED (not a manuscript figure):                     labels = c(
+# PRUNED (not a manuscript figure):       `No and Mild` = "<span style='color:#058b8e;'>No and Mild</span>",
+# PRUNED (not a manuscript figure):       Severe = "<span style='color:#B85000;'>Severe</span>"))+
+# PRUNED (not a manuscript figure):   labs(x = "Days", title = "PTCy: No and Mild vs Severe")
+# PRUNED (not a manuscript figure): test_PTCy <- result_PTCy[[2]]
+
+# PRUNED (not a manuscript figure): result_All_byPTCy <- div_cut(patient_data_all_clinic[patient_data_all_clinic$PatientID != "R070",], "PTCy", num_cuts = 4, div_metric ="shannons.diversity" , ylab = "Shannon's Diversity", title = "PTCy vs No PTCy")
+# PRUNED (not a manuscript figure): All_byPTCy <- result_All_byPTCy[[1]]+
+# PRUNED (not a manuscript figure):   scale_fill_manual(values = c("#E6BE60", "#A483AF"),
+# PRUNED (not a manuscript figure):                     labels = c(
+# PRUNED (not a manuscript figure):       `No PTCy` = "<span style='color:#E6BE60;'>No PTCy</span>",
+# PRUNED (not a manuscript figure):       PTCy = "<span style='color:#A483AF;'>PTCy</span>"))+
+# PRUNED (not a manuscript figure):   labs(x = "Days")
+
+# PRUNED (not a manuscript figure): test_All_byPTCy <- result_All_byPTCy[[2]]
+
+
+
+# PRUNED (not a manuscript figure): plot(Both)
+# PRUNED (not a manuscript figure): plot(NoPTCy)
+# PRUNED (not a manuscript figure): plot(PTCy)
+# PRUNED (not a manuscript figure): plot(All_byPTCy)
+
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1ex/Grade_Shannon_',type,'.png'), Both, width = 8, height = 4, dpi = 600)
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1ex/Grade_Shannon_', type,'.pdf'), Both, width = 8, height = 4, dpi = 600)
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1ex/Grade_Shannon_', type,'.svg'), Both, width = 8, height = 4, dpi = 600)
+
+patient_data_all_clinic_corrected <- dplyr::full_join(patient_data_allo_copy, meta_data_clin, by = "PatientID")%>%
+  try(mutate(PTCy = PTCy.x))%>%
+  try(select(-c(PTCy.x, PTCy.y)))%>%
+  mutate(GVHD_GRADE_1 = ifelse(grepl("Severe", GVHD_GRADE_1), "Severe", "No and Mild"))%>%
+  mutate(GVHD_GRADE_1 = factor(GVHD_GRADE_1, levels = c("No and Mild", "Severe")))
+patient_data_all_clinic_corrected <- patient_data_all_clinic_corrected[!is.na(patient_data_all_clinic_corrected$shannons.diversity),]
+
+if(remove_pat_regx != ""){
+  patient_data_all_clinic_corrected <- patient_data_all_clinic_corrected[!grepl(remove_pat_regx,patient_data_all_clinic_corrected$PatientID),]
+}
+
+result_Both_corrected <- div_cut(patient_data_all_clinic_corrected, type, num_cuts = 4, div_metric ="shannons.diversity" , ylab = "Shannon's Diversity",)
+Both_corrected <- result_Both_corrected[[1]]+
+  scale_fill_manual(name = "GVHD Grade", values = c("#058b8e", "#B85000", "grey"),
+                    labels = c(
+      `No and Mild` = "<span style='color:#058b8e;'>No and Mild</span>",
+      Severe = "<span style='color:#B85000;'>Severe</span>"))+
+  labs(x = "Days", title = "No and Mild vs Severe")
+test_BothPTCy_corrected <- result_Both_corrected[[2]]
+
+cat("Grade_Shannon_corrected N =", nrow(result_Both_corrected[[3]]), "\n")
+
+plot(Both_corrected)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/Grade_Shannon_corrected',type,'.png'), Both_corrected, width = 8, height = 4, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/Grade_Shannon_corrected', type,'.pdf'), Both_corrected, width = 8, height = 4, dpi = 600)
+tab_4b <- result_Both_corrected[[3]] %>% group_by(bins, .data[[type]]) %>% summarise(N = n(), .groups = "drop") %>% rename(group = !!type)
+make_sample_size_fig(tab_4b, "group", "Grade_Shannon_correctedGVHD_GRADE_1", grade2_colors, "Figure1ex", "Grade_Shannon_correctedGVHD_GRADE_1", bins_col = "bins")
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/Grade_Shannon_corrected', type,'.svg'), Both_corrected, width = 8, height = 4, dpi = 600)
+
+# --- Exact p-value version of panel b (Grade_Shannon_corrected) ---
+result_Both_corrected_pvalue <- div_cut(patient_data_all_clinic_corrected, type, num_cuts = 4, div_metric = "shannons.diversity", ylab = "Shannon's Diversity", pval_label = "p.adj.exact", pval_size = 6)
+Both_corrected_pvalue <- result_Both_corrected_pvalue[[1]]+
+  scale_fill_manual(name = "GVHD Grade", values = c("#058b8e", "#B85000", "grey"),
+                    labels = c(
+      `No and Mild` = "<span style='color:#058b8e;'>No and Mild</span>",
+      Severe = "<span style='color:#B85000;'>Severe</span>"))+
+  labs(x = "Days", title = "No and Mild vs Severe")
+
+plot(Both_corrected_pvalue)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/Grade_Shannon_corrected_pvalue',type,'.png'), Both_corrected_pvalue, width = 8, height = 4, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/Grade_Shannon_corrected_pvalue', type,'.pdf'), Both_corrected_pvalue, width = 8, height = 4, dpi = 600)
+tab_4b_pv <- result_Both_corrected_pvalue[[3]] %>% group_by(bins, .data[[type]]) %>% summarise(N = n(), .groups = "drop") %>% rename(group = !!type)
+make_sample_size_fig(tab_4b_pv, "group", "Grade_Shannon_corrected_pvalueGVHD_GRADE_1", grade2_colors, "Figure1ex", "Grade_Shannon_corrected_pvalueGVHD_GRADE_1", bins_col = "bins")
+
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1ex/GradeNoPTCy_Shannon_',type,'.png'), NoPTCy,width = 8, height = 4, dpi = 600)
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1ex/GradeNoPTCy_Shannon_', type,'.pdf'), NoPTCy,width = 8, height = 4, dpi = 600)
+
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1ex/GradePTCy_Shannon_',type,'.png'), PTCy, width = 8, height = 4, dpi = 600)
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1ex/GradePTCy_Shannon_', type,'.pdf'), PTCy, width = 8, height = 4, dpi = 600)
+
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure3/ByPTCy_Shannon_',type,'.png'), All_byPTCy, width = 8, height = 4, dpi = 600)
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure3/ByPTCy_Shannon_', type,'.pdf'), All_byPTCy, width = 8, height = 4, dpi = 600)
+
+
+
+```
+
+
+```{r, fig.width = 8 , fig.height = 4}
+patient_data_allo_CD4 <-bind_rows(all_allo_div_CD4)%>%
+  subset(!is.na(slope))%>%
+  mutate(cell_type = "CD4", PatientID = str_split_fixed(ID, "_", 3)[,1], SampleID = str_split_fixed(ID, "_", 3)[,2])
+patient_data_allo_CD8 <-bind_rows(all_allo_div_CD8)%>%
+  subset(!is.na(slope))%>%
+  mutate(cell_type = "CD8", PatientID = str_split_fixed(ID, "_", 3)[,1], SampleID = str_split_fixed(ID, "_", 3)[,2])
+
+patient_data_allo_CD48 <- bind_rows(patient_data_allo_CD8, patient_data_allo_CD4)
+patient_data_allo_CD48 <- dplyr::inner_join(patient_data_allo_CD48, meta_data_clin, by = "PatientID")
+
+if(remove_pat_regx != ""){
+  patient_data_all_clinic <- patient_data_all_clinic[!grepl(remove_pat_regx,patient_data_all_clinic$PatientID),]
+}
+patient_data_allo_CD48_clinic <- patient_data_allo_CD48#[!grepl("70",patient_data_allo_CD48$PatientID),]
+
+
+patient_data_allo_CD48_clinic <- patient_data_allo_CD48_clinic%>%
+  mutate(GVHD_GRADE_1 = ifelse(grepl("Severe", GVHD_GRADE_1), "Severe", "No and Mild"))%>%
+  mutate(GVHD_GRADE_1 = factor(GVHD_GRADE_1, levels = c("No and Mild", "Severe")))
+
+patient_data_allo_CD48_clinic$GVHD_GRADE_2 <- factor(patient_data_allo_CD48_clinic$GVHD_GRADE_2, levels = c("Mild", "Moderate", "Severe"))
+patient_data_allo_CD48_clinic_CD4 <- subset(patient_data_allo_CD48_clinic, grepl("4",patient_data_allo_CD48_clinic$cell_type))
+patient_data_allo_CD48_clinic_CD8 <- subset(patient_data_allo_CD48_clinic, grepl("8",patient_data_allo_CD48_clinic$cell_type))
+patient_data_allo_CD48_clinic_PTCy <- subset(patient_data_allo_CD48_clinic, "PTCy" == patient_data_allo_CD48_clinic$PTCy)
+patient_data_allo_CD48_clinic_noPTCy <- subset(patient_data_allo_CD48_clinic, "PTCy" != patient_data_allo_CD48_clinic$PTCy)
+
+
+n = 4
+
+
+BothPTCy_CD4_results <- div_cut(patient_data_allo_CD48_clinic_CD4, "PTCy", num_cuts = n, ylab = "Shannon's Diversity", div_metric = "shannons.diversity")
+BothPTCy_CD4 <- BothPTCy_CD4_results[[1]]+
+  scale_fill_manual(values = c("#E6BE60", "#A483AF"),
+                    labels = c(
+      `No PTCy` = "<span style='color:#E6BE60;'>No PTCy</span>",
+      PTCy = "<span style='color:#A483AF;'>PTCy</span>"))+
+  labs(title = "No PTCy vs PTCy CD4", x = "Days")+
+  theme(legend.position = "none")
+test_BothPTCy_CD4 <- BothPTCy_CD4_results[[2]]
+BothPTCy_CD4_data <- BothPTCy_CD4_results[[3]]
+
+BothPTCy_CD8_results <- div_cut(patient_data_allo_CD48_clinic_CD8, "PTCy", num_cuts = n, ylab = "Shannon's Diversity", div_metric = "shannons.diversity")
+BothPTCy_CD8 <- BothPTCy_CD8_results[[1]]+
+  scale_fill_manual(values = c("#E6BE60", "#A483AF"),
+                    labels = c(
+      `No PTCy` = "<span style='color:#E6BE60;'>No PTCy</span>",
+      PTCy = "<span style='color:#A483AF;'>PTCy</span>"))+
+  labs(title = "No PTCy vs PTCy CD8", x = "Days")+
+  theme(legend.position = "none")
+test_BothPTCy_CD8 <- BothPTCy_CD8_results[[2]]
+BothPTCy_CD8_data <- BothPTCy_CD8_results[[3]]
+
+plot(BothPTCy_CD4)
+plot(BothPTCy_CD8)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure3/BothPTCy_CD4_corrected.png'), BothPTCy_CD4, width = 8, height = 4, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure3/BothPTCy_CD8_corrected.png'), BothPTCy_CD8, width = 8, height = 4, dpi = 600)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure3/BothPTCy_CD4_corrected.pdf'), BothPTCy_CD4, width = 8, height = 4, dpi = 600)
+tab_c <- BothPTCy_CD4_results[[3]] %>% group_by(bins, PTCy) %>% summarise(N = n(), .groups = "drop")
+make_sample_size_fig(tab_c, "PTCy", "BothPTCy_CD4_corrected", ptcy_colors, "Figure3", "BothPTCy_CD4_corrected", bins_col = "bins")
+
+ggsave(paste0(OUTPUT_PATH, '/Figure3/BothPTCy_CD8_corrected.pdf'), BothPTCy_CD8, width = 8, height = 4, dpi = 600)
+tab_e <- BothPTCy_CD8_results[[3]] %>% group_by(bins, PTCy) %>% summarise(N = n(), .groups = "drop")
+make_sample_size_fig(tab_e, "PTCy", "BothPTCy_CD8_corrected", ptcy_colors, "Figure3", "BothPTCy_CD8_corrected", bins_col = "bins")
+
+ggsave(paste0(OUTPUT_PATH, '/Figure3/BothPTCy_CD4_corrected.svg'), BothPTCy_CD4, width = 8, height = 4, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure3/BothPTCy_CD8_corrected.svg'), BothPTCy_CD8, width = 8, height = 4, dpi = 600)
+
+# --- Exact p-value versions of panels c/e (Shannon diversity by PTCy, CD4/CD8) ---
+BothPTCy_CD4_results_pvalue <- div_cut(patient_data_allo_CD48_clinic_CD4, "PTCy", num_cuts = n, ylab = "Shannon's Diversity", div_metric = "shannons.diversity", pval_label = "p.adj.exact", pval_size = 6)
+BothPTCy_CD4_pvalue <- BothPTCy_CD4_results_pvalue[[1]]+
+  scale_fill_manual(values = c("#E6BE60", "#A483AF"),
+                    labels = c(
+      `No PTCy` = "<span style='color:#E6BE60;'>No PTCy</span>",
+      PTCy = "<span style='color:#A483AF;'>PTCy</span>"))+
+  labs(title = "No PTCy vs PTCy CD4", x = "Days")+
+  theme(legend.position = "none")
+
+BothPTCy_CD8_results_pvalue <- div_cut(patient_data_allo_CD48_clinic_CD8, "PTCy", num_cuts = n, ylab = "Shannon's Diversity", div_metric = "shannons.diversity", pval_label = "p.adj.exact", pval_size = 6)
+BothPTCy_CD8_pvalue <- BothPTCy_CD8_results_pvalue[[1]]+
+  scale_fill_manual(values = c("#E6BE60", "#A483AF"),
+                    labels = c(
+      `No PTCy` = "<span style='color:#E6BE60;'>No PTCy</span>",
+      PTCy = "<span style='color:#A483AF;'>PTCy</span>"))+
+  labs(title = "No PTCy vs PTCy CD8", x = "Days")+
+  theme(legend.position = "none")
+
+plot(BothPTCy_CD4_pvalue)
+plot(BothPTCy_CD8_pvalue)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure3/BothPTCy_CD4_corrected_pvalue.png'), BothPTCy_CD4_pvalue, width = 8, height = 4, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure3/BothPTCy_CD8_corrected_pvalue.png'), BothPTCy_CD8_pvalue, width = 8, height = 4, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure3/BothPTCy_CD4_corrected_pvalue.pdf'), BothPTCy_CD4_pvalue, width = 8, height = 4, dpi = 600)
+tab_c_pv <- BothPTCy_CD4_results_pvalue[[3]] %>% group_by(bins, PTCy) %>% summarise(N = n(), .groups = "drop")
+make_sample_size_fig(tab_c_pv, "PTCy", "BothPTCy_CD4_corrected_pvalue", ptcy_colors, "Figure3", "BothPTCy_CD4_corrected_pvalue", bins_col = "bins")
+
+ggsave(paste0(OUTPUT_PATH, '/Figure3/BothPTCy_CD8_corrected_pvalue.pdf'), BothPTCy_CD8_pvalue, width = 8, height = 4, dpi = 600)
+tab_e_pv <- BothPTCy_CD8_results_pvalue[[3]] %>% group_by(bins, PTCy) %>% summarise(N = n(), .groups = "drop")
+make_sample_size_fig(tab_e_pv, "PTCy", "BothPTCy_CD8_corrected_pvalue", ptcy_colors, "Figure3", "BothPTCy_CD8_corrected_pvalue", bins_col = "bins")
+
+type = "GVHD_GRADE_1"
+
+num_cuts <- 2
+
+BothPTCy_CD4_results <- div_cut(patient_data_allo_CD48_clinic_CD4, type, num_cuts = num_cuts, ylab = "Shannon's Diversity", div_metric = "shannons.diversity")
+BothPTCy_CD4 <- BothPTCy_CD4_results[[1]]+
+  scale_fill_manual(name = "GVHD Grade", values = c("#058b8e", "#B85000", "grey"),
+                    labels = c(
+      `No and Mild` = "<span style='color:#058b8e;'>No and Mild</span>",
+      Severe = "<span style='color:#B85000;'>Severe</span>"))+
+  labs(title = "No and Mild vs Severe CD4+", x = "Days")
+test_BothPTCy_CD4 <- BothPTCy_CD4_results[[2]]
+BothPTCy_CD4_data <- BothPTCy_CD4_results[[3]]
+
+BothPTCy_CD8_results <- div_cut(patient_data_allo_CD48_clinic_CD8, type, num_cuts = num_cuts, ylab = "Shannon's Diversity", div_metric = "shannons.diversity")
+BothPTCy_CD8 <- BothPTCy_CD8_results[[1]]+
+  scale_fill_manual(name = "GVHD Grade", values = c("#058b8e", "#B85000", "grey"),
+                    labels = c(
+      `No and Mild` = "<span style='color:#058b8e;'>No and Mild</span>",
+      Severe = "<span style='color:#B85000;'>Severe</span>"))+
+  labs(title = "No and Mild vs Severe CD8+", x = "Days")
+test_BothPTCy_CD8 <- BothPTCy_CD8_results[[2]]
+BothPTCy_CD8_data <- BothPTCy_CD8_results[[3]]
+
+# --- Exact p-value versions of panels i/j (CD4/CD8 Shannon, GVHD grade) ---
+BothPTCy_CD4_results_pvalue <- div_cut(patient_data_allo_CD48_clinic_CD4, type, num_cuts = num_cuts, ylab = "Shannon's Diversity", div_metric = "shannons.diversity", pval_label = "p.adj.exact", pval_size = 6)
+BothPTCy_CD4_pvalue <- BothPTCy_CD4_results_pvalue[[1]]+
+  scale_fill_manual(name = "GVHD Grade", values = c("#058b8e", "#B85000", "grey"),
+                    labels = c(
+      `No and Mild` = "<span style='color:#058b8e;'>No and Mild</span>",
+      Severe = "<span style='color:#B85000;'>Severe</span>"))+
+  labs(title = "No and Mild vs Severe CD4+", x = "Days")
+
+BothPTCy_CD8_results_pvalue <- div_cut(patient_data_allo_CD48_clinic_CD8, type, num_cuts = num_cuts, ylab = "Shannon's Diversity", div_metric = "shannons.diversity", pval_label = "p.adj.exact", pval_size = 6)
+BothPTCy_CD8_pvalue <- BothPTCy_CD8_results_pvalue[[1]]+
+  scale_fill_manual(name = "GVHD Grade", values = c("#058b8e", "#B85000", "grey"),
+                    labels = c(
+      `No and Mild` = "<span style='color:#058b8e;'>No and Mild</span>",
+      Severe = "<span style='color:#B85000;'>Severe</span>"))+
+  labs(title = "No and Mild vs Severe CD8+", x = "Days")
+
+plot(BothPTCy_CD4_pvalue)
+plot(BothPTCy_CD8_pvalue)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/BothPTCy_CD4_shannons_corrected_pvalue',type,'.png'), BothPTCy_CD4_pvalue, width = 8, height = 4, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/BothPTCy_CD8_shannons_corrected_pvalue',type,'.png'), BothPTCy_CD8_pvalue, width = 8, height = 4, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/BothPTCy_CD4_shannons_corrected_pvalue',type,'.pdf'), BothPTCy_CD4_pvalue, width = 8, height = 4, dpi = 600)
+tab_4i_pv <- BothPTCy_CD4_results_pvalue[[3]] %>% group_by(bins, .data[[type]]) %>% summarise(N = n(), .groups = "drop") %>% rename(group = !!type)
+make_sample_size_fig(tab_4i_pv, "group", "BothPTCy_CD4_shannons_corrected_pvalueGVHD_GRADE_1", grade2_colors, "Figure1ex", "BothPTCy_CD4_shannons_corrected_pvalueGVHD_GRADE_1", bins_col = "bins")
+
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/BothPTCy_CD8_shannons_corrected_pvalue',type,'.pdf'), BothPTCy_CD8_pvalue, width = 8, height = 4, dpi = 600)
+tab_4j_pv <- BothPTCy_CD8_results_pvalue[[3]] %>% group_by(bins, .data[[type]]) %>% summarise(N = n(), .groups = "drop") %>% rename(group = !!type)
+make_sample_size_fig(tab_4j_pv, "group", "BothPTCy_CD8_shannons_corrected_pvalueGVHD_GRADE_1", grade2_colors, "Figure1ex", "BothPTCy_CD8_shannons_corrected_pvalueGVHD_GRADE_1", bins_col = "bins")
+
+# PRUNED (not a manuscript figure): NoPTCy_CD4_data <- subset(patient_data_allo_CD48_clinic_noPTCy,!grepl('CD4CD8',patient_data_allo_CD48_clinic_noPTCy$cell_type) & grepl('CD4',patient_data_allo_CD48_clinic_noPTCy$cell_type))
+
+# PRUNED (not a manuscript figure): NoPTCy_CD8_data <- subset(patient_data_allo_CD48_clinic_noPTCy,!grepl('CD4CD8',patient_data_allo_CD48_clinic_noPTCy$cell_type) & grepl('CD8',patient_data_allo_CD48_clinic_noPTCy$cell_type))
+
+# PRUNED (not a manuscript figure): PTCy_CD4_data <- subset(patient_data_allo_CD48_clinic_PTCy,!grepl('CD4CD8',patient_data_allo_CD48_clinic_PTCy$cell_type) & grepl('CD4',patient_data_allo_CD48_clinic_PTCy$cell_type))
+
+# PRUNED (not a manuscript figure): PTCy_CD8_data <- subset(patient_data_allo_CD48_clinic_PTCy,!grepl('CD4CD8',patient_data_allo_CD48_clinic_PTCy$cell_type) & grepl('CD8',patient_data_allo_CD48_clinic_PTCy$cell_type))
+
+
+# PRUNED (not a manuscript figure): NoPTCy_CD4_results <- div_cut(NoPTCy_CD4_data, type, num_cuts = num_cuts)
+# PRUNED (not a manuscript figure): NoPTCy_CD4 <- NoPTCy_CD4_results[[1]]+
+# PRUNED (not a manuscript figure):   scale_fill_manual(name = "GVHD Grade", values = c("#058b8e", "#B85000", "grey"),
+# PRUNED (not a manuscript figure):                     labels = c(
+# PRUNED (not a manuscript figure):       `No and Mild` = "<span style='color:#058b8e;'>No and Mild</span>",
+# PRUNED (not a manuscript figure):       Severe = "<span style='color:#B85000;'>Severe</span>"))+
+# PRUNED (not a manuscript figure):   labs(title = "No PTCy CD4", x = "Days")
+# PRUNED (not a manuscript figure): test_NoPTCy_CD4 <- NoPTCy_CD4_results[[2]]
+# PRUNED (not a manuscript figure): NoPTCy_CD4_data <- NoPTCy_CD4_results[[3]]
+
+# PRUNED (not a manuscript figure): NoPTCy_CD8_results <- div_cut(NoPTCy_CD8_data, type, num_cuts = num_cuts, ylab = "Shannon's Diversity", div_metric = "shannons.diversity")
+# PRUNED (not a manuscript figure): NoPTCy_CD8 <- NoPTCy_CD8_results[[1]]+
+# PRUNED (not a manuscript figure):   scale_fill_manual(name = "GVHD Grade", values = c("#058b8e", "#B85000", "grey"),
+# PRUNED (not a manuscript figure):                     labels = c(
+# PRUNED (not a manuscript figure):       `No and Mild` = "<span style='color:#058b8e;'>No and Mild</span>",
+# PRUNED (not a manuscript figure):       Severe = "<span style='color:#B85000;'>Severe</span>"))+
+# PRUNED (not a manuscript figure):   labs(title = "No PTCy CD8", x = "Days")
+# PRUNED (not a manuscript figure): test_NoPTCy_CD8 <- NoPTCy_CD8_results[[2]]
+# PRUNED (not a manuscript figure): NoPTCy_CD8_data <-NoPTCy_CD8_results[[3]]
+
+# PRUNED (not a manuscript figure): PTCy_CD4_results <- div_cut(PTCy_CD4_data, type, num_cuts = num_cuts, ylab = "Shannon's Diversity", div_metric = "shannons.diversity")
+# PRUNED (not a manuscript figure): PTCy_CD4 <- PTCy_CD4_results[[1]]+
+# PRUNED (not a manuscript figure):   scale_fill_manual(name = "GVHD Grade", values = c("#058b8e", "#B85000", "grey"),
+# PRUNED (not a manuscript figure):                     labels = c(
+# PRUNED (not a manuscript figure):       `No and Mild` = "<span style='color:#058b8e;'>No and Mild</span>",
+# PRUNED (not a manuscript figure):       Severe = "<span style='color:#B85000;'>Severe</span>"))+
+# PRUNED (not a manuscript figure):   labs(title = "PTCy CD4", x = "Days")
+# PRUNED (not a manuscript figure): test_PTCy_CD4 <- PTCy_CD4_results[[2]]
+# PRUNED (not a manuscript figure): PTCy_CD4_data <- PTCy_CD4_results[[3]]
+
+
+# PRUNED (not a manuscript figure): PTCy_CD8_results <- div_cut(PTCy_CD8_data, type, num_cuts = num_cuts, ylab = "Shannon's Diversity", div_metric = "shannons.diversity")
+# PRUNED (not a manuscript figure): PTCy_CD8 <- PTCy_CD8_results[[1]]+
+# PRUNED (not a manuscript figure):   scale_fill_manual(name = "GVHD Grade", values = c("#058b8e", "#B85000", "grey"),
+# PRUNED (not a manuscript figure):                     labels = c(
+# PRUNED (not a manuscript figure):       `No and Mild` = "<span style='color:#058b8e;'>No and Mild</span>",
+# PRUNED (not a manuscript figure):       Severe = "<span style='color:#B85000;'>Severe</span>"))+
+# PRUNED (not a manuscript figure):   labs(title = "PTCy CD8", x = "Days")
+# PRUNED (not a manuscript figure): test_PTCy_CD8 <- PTCy_CD8_results[[2]]
+# PRUNED (not a manuscript figure): PTCy_CD8_data <- PTCy_CD8_results[[3]]
+
+plot(BothPTCy_CD4)
+plot(BothPTCy_CD8)
+# PRUNED (not a manuscript figure): plot(NoPTCy_CD4)
+# PRUNED (not a manuscript figure): plot(NoPTCy_CD8)
+# PRUNED (not a manuscript figure): plot(PTCy_CD4)
+# PRUNED (not a manuscript figure): plot(PTCy_CD8)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/BothPTCy_CD4_shannons_corrected',type,'.png'), BothPTCy_CD4, width = 8, height = 4, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/BothPTCy_CD8_shannons_corrected',type,'.png'), BothPTCy_CD8, width = 8, height = 4, dpi = 600)
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1ex/NoPTCy_CD4_shannons_corrected',type,'.png'), NoPTCy_CD4, width = 8, height = 4, dpi = 600)
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1ex/NoPTCy_CD8_shannons_corrected',type,'.png'), NoPTCy_CD8, width = 8, height = 4, dpi = 600)
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1ex/PTCy_CD4_shannons_corrected',type,'.png'), PTCy_CD4, width = 8, height = 4, dpi = 600)
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1ex/PTCy_CD8_shannons_corrected',type,'.png'), PTCy_CD8, width = 8, height = 4, dpi = 600)
+
+
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/BothPTCy_CD4_shannons_corrected',type,'.pdf'), BothPTCy_CD4, width = 8, height = 4, dpi = 600)
+tab_4i <- BothPTCy_CD4_results[[3]] %>% group_by(bins, .data[[type]]) %>% summarise(N = n(), .groups = "drop") %>% rename(group = !!type)
+make_sample_size_fig(tab_4i, "group", "BothPTCy_CD4_shannons_correctedGVHD_GRADE_1", grade2_colors, "Figure1ex", "BothPTCy_CD4_shannons_correctedGVHD_GRADE_1", bins_col = "bins")
+
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/BothPTCy_CD8_shannons_corrected',type,'.pdf'), BothPTCy_CD8, width = 8, height = 4, dpi = 600)
+tab_4j <- BothPTCy_CD8_results[[3]] %>% group_by(bins, .data[[type]]) %>% summarise(N = n(), .groups = "drop") %>% rename(group = !!type)
+make_sample_size_fig(tab_4j, "group", "BothPTCy_CD8_shannons_correctedGVHD_GRADE_1", grade2_colors, "Figure1ex", "BothPTCy_CD8_shannons_correctedGVHD_GRADE_1", bins_col = "bins")
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1ex/NoPTCy_CD4_shannons_corrected',type,'.pdf'), NoPTCy_CD4, width = 8, height = 4, dpi = 600)
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1ex/NoPTCy_CD8_shannons_corrected',type,'.pdf'), NoPTCy_CD8, width = 8, height = 4, dpi = 600)
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1ex/PTCy_CD4_shannons_corrected',type,'.pdf'), PTCy_CD4, width = 8, height = 4, dpi = 600)
+# PRUNED (not a manuscript figure): ggsave(paste0(OUTPUT_PATH, '/Figure1ex/PTCy_CD8_shannons_corrected',type,'.pdf'), PTCy_CD8, width = 8, height = 4, dpi = 600)
+
+```
+
+
+
+```{r, fig.height=10/1.1,fig.width = 18/1.1, warning = FALSE}
+clinical_data <- read_excel(EXCEL_PATH, sheet = 'Patient Metadata cont.')
+
+patient_data_all_clinic <- dplyr::inner_join(patient_data_all, clinical_data, by = "PatientID")%>%
+  dplyr::inner_join(meta_data, by = "PatientID")%>%
+  filter(strtoi(SampleID) > 3 | grepl("MLR|unstim", SampleID))%>%
+  mutate(Onset = as.numeric(Onset), `EBV +` = as.numeric(`EBV +`),`Off Immunosuppresion` = as.numeric(`Off Immunosuppresion`), `CMV +` = as.numeric(`CMV +`),`HHV6 +` = as.numeric(`HHV6 +`), Systemic_Steroids = as.numeric(Systemic_Steroids) )
+severe_cumulative <- patient_data_all_clinic[grepl('Severe',patient_data_all_clinic$GVHD_GRADE_1),]
+mild_cumulative <- patient_data_all_clinic[grepl('Mild',patient_data_all_clinic$GVHD_GRADE_1),]
+no_cumulative <- patient_data_all_clinic[grepl('No',patient_data_all_clinic$GVHD_GRADE_1),]
+mild_cumulative <- mild_cumulative
+
+no_cumulative$`Off Immunosuppresion` <- as.numeric(gsub("[^0-9]", "", no_cumulative$`Off Immunosuppresion`))
+mild_cumulative$`Off Immunosuppresion` <- as.numeric(gsub("[^0-9]", "", mild_cumulative$`Off Immunosuppresion`))
+severe_cumulative$`Off Immunosuppresion` <- as.numeric(gsub("[^0-9]", "", severe_cumulative$`Off Immunosuppresion`))
+
+labels <- c("GHVD Onset", "Off Immunosuppresion", "EB Viremia", "CM Viremia", "HHV6", "Systemic Steroid")
+##SEVERE
+
+severe_cumulative_fig <- div_fig_pat(severe_cumulative, 'shannons.diversity', c('all'), 'PatientID', ylim = c(1,10))
+severe_cumulative_fig_early <- severe_cumulative_fig[[1]]+
+  labs(title = 'Severe GVHD', y = "Shannon's Diveristy")+
+  theme(text = element_text(size = 36), plot.margin=unit(c(0,0,0,6.2), 'cm'))
+severe_cumulative_fig_later <- severe_cumulative_fig[[2]]+
+  theme(text = element_text(size = 36))
+severe_meta_data_plot <- plot_metatime_cont(severe_cumulative, c("Onset", "Off Immunosuppresion", "EBV +", "CMV +", "HHV6 +", "Systemic_Steroids"), 'SampleID', label = labels, max_tp = severe_cumulative_fig[[3]])
+
+severe_meta_data_plot[[1]] <- severe_meta_data_plot[[1]]+
+  theme(text = element_text(size = 28))
+severe_meta_data_plot[[2]] <- severe_meta_data_plot[[2]]+
+  theme(text = element_text(size = 28))
+
+  severe_comb <- plot_grid(plotlist = list(severe_cumulative_fig_early, severe_cumulative_fig_later), ncol = 2, nrow = 1, hjust = 5, align = "h", rel_widths = c(1, .2))
+
+severe_meta_comb <- plot_grid(plotlist = list(severe_meta_data_plot[[1]], severe_meta_data_plot[[2]]), ncol = 2, nrow = 1, hjust = 5, align = "h", rel_widths = c(1, .2))
+
+Severe_meta_fig <- plot_grid(severe_comb, severe_meta_comb, nrow = 2, align = "hv", greedy = TRUE, rel_heights = c(1,.3))
+
+##MIlD
+
+mild_cumulative_fig <- div_fig_pat(mild_cumulative, 'shannons.diversity', c('all'), 'PatientID', ylim = c(1,10))
+mild_cumulative_fig_early <- mild_cumulative_fig[[1]]+
+  labs(title = 'Mild GVHD', y = "Shannon's Diveristy")+
+  theme(text = element_text(size = 36), plot.margin=unit(c(0,0,0,6.2), 'cm'))
+mild_cumulative_fig_later <- mild_cumulative_fig[[2]]+
+  theme(text = element_text(size = 36))
+mild_meta_data_plot <- plot_metatime_cont(mild_cumulative, c("Onset", "Off Immunosuppresion", "EBV +", "CMV +", "HHV6 +", "Systemic_Steroids"), 'SampleID', label = labels, max_tp = mild_cumulative_fig[[3]])
+
+mild_meta_data_plot[[1]] <- mild_meta_data_plot[[1]]+
+  theme(text = element_text(size = 28))
+
+mild_meta_data_plot[[2]] <- mild_meta_data_plot[[2]]+
+  theme(text = element_text(size = 28))
+
+  mild_comb <- plot_grid(plotlist = list(mild_cumulative_fig_early, mild_cumulative_fig_later), ncol = 2, nrow = 1, hjust = 5, align = "h", rel_widths = c(1, .2))
+
+ mild_meta_comb <- plot_grid(plotlist = list(mild_meta_data_plot[[1]], mild_meta_data_plot[[2]]), ncol = 2, nrow = 1, hjust = 5, align = "h", rel_widths = c(1, .2))
+
+Mild_meta_fig <- plot_grid(mild_comb, mild_meta_comb, nrow = 2, align = "hv", greedy = TRUE, rel_heights = c(1,.3))
+
+##NO
+
+no_cumulative_fig <- div_fig_pat(no_cumulative, 'shannons.diversity', c('all'), 'PatientID', ylim = c(1,10))
+no_cumulative_fig_early <- no_cumulative_fig[[1]]+
+  labs(title = 'No GVHD', y = "Shannon's Diveristy")+
+  theme(text = element_text(size = 36), plot.margin=unit(c(0,0,0,6.2), 'cm'))
+no_cumulative_fig_later <- no_cumulative_fig[[2]]+
+  theme(text = element_text(size = 36))
+no_meta_data_plot <- plot_metatime_cont(no_cumulative, c("Onset", "Off Immunosuppresion", "EBV +", "CMV +", "HHV6 +", "Systemic_Steroids"), 'SampleID', label = labels, max_tp = no_cumulative_fig[[3]])
+
+no_meta_data_plot[[1]] <- no_meta_data_plot[[1]]+
+  theme(text = element_text(size = 28))
+
+no_meta_data_plot[[2]] <- no_meta_data_plot[[2]]+
+  theme(text = element_text(size = 28))
+
+  no_comb <- plot_grid(plotlist = list(no_cumulative_fig_early, no_cumulative_fig_later), ncol = 2, nrow = 1, hjust = 5, align = "h", rel_widths = c(1, .2))
+
+  no_meta_comb <- plot_grid(plotlist = list(no_meta_data_plot[[1]], no_meta_data_plot[[2]]), ncol = 2, nrow = 1, hjust = 5, align = "h", rel_widths = c(1, .2))
+
+No_meta_fig <- plot_grid(no_comb, no_meta_comb, nrow = 2, align = "hv", greedy = TRUE, rel_heights = c(1,.3))
+
+plot(Severe_meta_fig)
+plot(Mild_meta_fig)
+plot(No_meta_fig)
+
+
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/severe_cumulative.png'), Severe_meta_fig, width = 18/1.1, height = 10/1.1, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/mild_cumuluative.png'), Mild_meta_fig, width = 18/1.1, height = 10, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/no_cumuluative.png'), No_meta_fig, width = 18/1.1, height = 10/1.1, dpi = 600)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/severe_cumulative.pdf'), Severe_meta_fig, width = 18/1.1, height = 10/1.1, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/mild_cumuluative.pdf'), Mild_meta_fig, width = 18/1.1, height = 10/1.1, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/no_cumuluative.pdf'), No_meta_fig, width = 18/1.1, height = 10/1.3, dpi = 600)
+
+tab_supp2a <- patient_data_all_clinic %>% distinct(PatientID, GVHD_GRADE_1) %>% group_by(GVHD_GRADE_1) %>% summarise(N = n(), .groups = "drop")
+make_sample_size_fig(tab_supp2a, "GVHD_GRADE_1", "severe_cumulative", grade3_colors, "Figure1ex", "severe_cumulative")
+make_sample_size_fig(tab_supp2a, "GVHD_GRADE_1", "mild_cumuluative", grade3_colors, "Figure1ex", "mild_cumuluative")
+make_sample_size_fig(tab_supp2a, "GVHD_GRADE_1", "no_cumuluative", grade3_colors, "Figure1ex", "no_cumuluative")
+
+```
+
+```{r, fig.height=10/1.1,fig.width = 18/1.1, warning = FALSE}
+clinical_data <- read_excel(EXCEL_PATH, sheet = 'Patient Metadata cont.')
+
+patient_data_all_clinic <- dplyr::inner_join(patient_data_all, clinical_data, by = "PatientID")%>%
+  dplyr::inner_join(meta_data, by = "PatientID")%>%
+  filter(strtoi(SampleID) > 3 | !grepl("MLR|unstim", SampleID))%>%
+  mutate(Onset = as.numeric(Onset), `EBV +` = as.numeric(`EBV +`),`Off Immunosuppresion` = as.numeric(gsub("[^0-9]", "", `Off Immunosuppresion`)), `CMV +` = as.numeric(`CMV +`),`HHV6 +` = as.numeric(`HHV6 +`), Systemic_Steroids = as.numeric(Systemic_Steroids) )
+severe_cumulative <- patient_data_all_clinic[grepl('Severe',patient_data_all_clinic$GVHD_GRADE_1),]
+mild_cumulative <- patient_data_all_clinic[grepl('Mild',patient_data_all_clinic$GVHD_GRADE_1),]
+no_cumulative <- patient_data_all_clinic[grepl('No',patient_data_all_clinic$GVHD_GRADE_1),]
+mild_cumulative <- mild_cumulative
+
+no_cumulative$`Off Immunosuppresion` <- as.numeric(gsub("[^0-9]", "", no_cumulative$`Off Immunosuppresion`))
+mild_cumulative$`Off Immunosuppresion` <- as.numeric(gsub("[^0-9]", "", mild_cumulative$`Off Immunosuppresion`))
+severe_cumulative$`Off Immunosuppresion` <- as.numeric(gsub("[^0-9]", "", severe_cumulative$`Off Immunosuppresion`))
+
+labels <- c("GHVD Onset", "Off Immunosuppresion", "EBV Viremia", "CMV Viremia", "HHV6 Viremia", "Systemic Steroid")
+##SEVERE
+
+severe_cumulative_fig <- div_fig_pat(severe_cumulative,  'cum_freq', c('allo'), 'PatientID', ylim = c(0, 0.05))
+severe_cumulative_fig_early <- severe_cumulative_fig[[1]]+
+  labs(y = "Alloreactive Cumulative\n Frequency", title = 'Severe GVHD')+
+  theme(text = element_text(size = 32), plot.margin=unit(c(0,0,0,5.2), 'cm'))
+severe_cumulative_fig_later <- severe_cumulative_fig[[2]]+
+  theme(text = element_text(size = 32))
+severe_meta_data_plot <- plot_metatime_cont(severe_cumulative, c("Onset", "Off Immunosuppresion", "EBV +", "CMV +", "HHV6 +", "Systemic_Steroids"), 'SampleID', label = labels, max_tp = severe_cumulative_fig[[3]])
+
+severe_meta_data_plot[[1]] <- severe_meta_data_plot[[1]]+
+  theme(text = element_text(size = 26))+
+  coord_cartesian(xlim = c(0,360))+
+  scale_x_continuous(expand = expansion(mult = c(0,0)))
+
+severe_meta_data_plot[[2]] <- severe_meta_data_plot[[2]]+
+  theme(text = element_text(size = 26))+
+  coord_cartesian(xlim = c(360,severe_cumulative_fig[[3]]))+
+  scale_x_continuous(expand = expansion(mult = c(0,0)))
+
+severe_comb <- plot_grid(plotlist = list(severe_cumulative_fig_early, severe_cumulative_fig_later), ncol = 2, nrow = 1, hjust = 5, align = "h", rel_widths = c(1, .2))
+
+
+severe_meta_comb <- plot_grid(plotlist = list(severe_meta_data_plot[[1]], severe_meta_data_plot[[2]]), ncol = 2, nrow = 1, hjust = 5, align = "h", rel_widths = c(1, .2))
+
+Severe_meta_fig <- plot_grid(severe_comb, severe_meta_comb, nrow = 2, greedy = TRUE, rel_heights = c(1,.3))
+
+
+##Mild
+
+mild_cumulative_fig <- div_fig_pat(mild_cumulative,  'cum_freq', c('allo'), 'PatientID', ylim = c(0, 0.05))
+mild_cumulative_fig_early <- mild_cumulative_fig[[1]]+
+  labs(y = "Alloreactive Cumulative\n Frequency", title = 'Mild GVHD')+
+  theme(text = element_text(size = 32), plot.margin=unit(c(0,0,0,5.2), 'cm'))
+mild_cumulative_fig_later <- mild_cumulative_fig[[2]]+
+  theme(text = element_text(size = 32))
+mild_meta_data_plot <- plot_metatime_cont(mild_cumulative, c("Onset", "Off Immunosuppresion", "EBV +", "CMV +", "HHV6 +", "Systemic_Steroids"), 'SampleID', label = labels, max_tp = mild_cumulative_fig[[3]])
+
+mild_meta_data_plot[[1]] <- mild_meta_data_plot[[1]]+
+  theme(text = element_text(size = 26))
+
+mild_meta_data_plot[[2]] <- mild_meta_data_plot[[2]]+
+  theme(text = element_text(size = 26))
+
+mild_comb <- plot_grid(plotlist = list(mild_cumulative_fig_early, mild_cumulative_fig_later), ncol = 2, nrow = 1, hjust = 5, align = "h", rel_widths = c(1, .2))
+
+
+mild_meta_comb <- plot_grid(plotlist = list(mild_meta_data_plot[[1]], mild_meta_data_plot[[2]]), ncol = 2, nrow = 1, hjust = 5, align = "h", rel_widths = c(1, .2))
+
+Mild_meta_fig <- plot_grid(mild_comb, mild_meta_comb, nrow = 2, greedy = TRUE, rel_heights = c(1,.3))
+
+
+##NO
+
+no_cumulative_fig <- div_fig_pat(no_cumulative,  'cum_freq', c('allo'), 'PatientID', ylim = c(0, 0.05))
+no_cumulative_fig_early <- no_cumulative_fig[[1]]+
+  labs(y = "Alloreactive Cumulative\n Frequency", title = 'No GVHD')+
+  theme(text = element_text(size = 32), plot.margin=unit(c(0,0,0,5.2), 'cm'))
+no_cumulative_fig_later <- no_cumulative_fig[[2]]+
+  theme(text = element_text(size = 32))
+no_meta_data_plot <- plot_metatime_cont(no_cumulative, c("Onset", "Off Immunosuppresion", "EBV +", "CMV +", "HHV6 +", "Systemic_Steroids"), 'SampleID', label = labels, max_tp = no_cumulative_fig[[3]])
+
+no_meta_data_plot[[1]] <- no_meta_data_plot[[1]]+
+  theme(text = element_text(size = 26))
+
+no_meta_data_plot[[2]] <- no_meta_data_plot[[2]]+
+  theme(text = element_text(size = 26))
+
+no_comb <- plot_grid(plotlist = list(no_cumulative_fig_early, no_cumulative_fig_later), ncol = 2, nrow = 1, hjust = 5, align = "h", rel_widths = c(1, .2))
+
+
+no_meta_comb <- plot_grid(plotlist = list(no_meta_data_plot[[1]], no_meta_data_plot[[2]]), ncol = 2, nrow = 1, hjust = 5, align = "h", rel_widths = c(1, .2))
+
+No_meta_fig <- plot_grid(no_comb, no_meta_comb, nrow = 2, greedy = TRUE, rel_heights = c(1,.3))
+
+
+plot(Severe_meta_fig)
+plot(Mild_meta_fig)
+plot(No_meta_fig)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/severe_cumulative.png'), Severe_meta_fig, width = 18/1.1, height = 10/1.1, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/mild_cumuluative.png'), Mild_meta_fig, width = 18/1.1, height = 10/1.1, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/no_cumuluative.png'), No_meta_fig, width = 18/1.1, height = 10/1.1, dpi = 600)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure1/severe_cumulative.pdf'), Severe_meta_fig, width = 18/1.1, height = 10/1.3, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1/mild_cumuluative.pdf'), Mild_meta_fig, width = 18/1.1, height = 10/1.3, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1/no_cumuluative.pdf'), No_meta_fig, width = 18/1.3, height = 7.5, dpi = 600)
+
+tab_1d <- patient_data_all_clinic %>% distinct(PatientID, GVHD_GRADE_1) %>% group_by(GVHD_GRADE_1) %>% summarise(N = n(), .groups = "drop")
+make_sample_size_fig(tab_1d, "GVHD_GRADE_1", "severe_cumulative", grade3_colors, "Figure1", "severe_cumulative")
+make_sample_size_fig(tab_1d, "GVHD_GRADE_1", "mild_cumuluative", grade3_colors, "Figure1", "mild_cumuluative")
+make_sample_size_fig(tab_1d, "GVHD_GRADE_1", "no_cumuluative", grade3_colors, "Figure1", "no_cumuluative")
+
+write.csv(patient_data_all_clinic, file.path(OUTPUT_PATH, "PatientDataClinic.csv"))
+
+
+```
+
+
+```{r,fig.height=10,fig.width = 18, warning = FALSE}
+clinical_data <- read_excel(EXCEL_PATH, sheet = 'Patient Metadata cont.')
+
+
+
+data_CD48_all_expand_adj <- data_CD48_all%>%
+  filter(templates !=0)%>%
+  group_by(PatientID,timepoint)%>%
+  summarise(n_clone = n())
+
+
+
+patient_data_all_clinic <- dplyr::inner_join(data_CD48_all_expand_adj, clinical_data, by = "PatientID")%>%
+  dplyr::inner_join(meta_data, by = "PatientID")%>%
+  filter(strtoi(timepoint) > 3 | !grepl("MLR|unstim", timepoint))%>%
+  mutate(Onset = as.numeric(Onset), `EBV +` = as.numeric(`EBV +`),`Off Immunosuppresion` = as.numeric(gsub("[^0-9]", "", `Off Immunosuppresion`)), `CMV +` = as.numeric(`CMV +`),`HHV6 +` = as.numeric(`HHV6 +`), Systemic_Steroids = as.numeric(Systemic_Steroids))%>%
+mutate(GVHD_GRADE_1 = ifelse(grepl("Severe", GVHD_GRADE_1), "Severe", GVHD_GRADE_1), Rep_div = "allo", SampleID = timepoint)
+severe_cumulative <- patient_data_all_clinic[grepl('Severe',patient_data_all_clinic$GVHD_GRADE_1),]
+mild_cumulative <- patient_data_all_clinic[grepl('Mild',patient_data_all_clinic$GVHD_GRADE_1),]
+no_cumulative <- patient_data_all_clinic[grepl('No',patient_data_all_clinic$GVHD_GRADE_1),]
+mild_cumulative <- mild_cumulative
+
+no_cumulative$`Off Immunosuppresion` <- as.numeric(gsub("[^0-9]", "", no_cumulative$`Off Immunosuppresion`))
+mild_cumulative$`Off Immunosuppresion` <- as.numeric(gsub("[^0-9]", "", mild_cumulative$`Off Immunosuppresion`))
+severe_cumulative$`Off Immunosuppresion` <- as.numeric(gsub("[^0-9]", "", severe_cumulative$`Off Immunosuppresion`))
+
+labels <- c("GHVD Onset", "Off Immunosuppresion", "EBV Viremia", "CMV Viremia", "HHV6 Viremia", "Systemic Steroid")
+##SEVERE
+
+severe_cumulative_fig <- div_fig_pat(severe_cumulative,  'n_clone', c('allo'), 'PatientID', ylim = c(0, 2000))
+severe_cumulative_fig_early <- severe_cumulative_fig[[1]]+
+  labs(title = 'Severe GVHD', y = "# of Clones")+
+  theme(text = element_text(size = 20), plot.margin=unit(c(0,0,0,5.1), 'cm'))+
+  scale_y_continuous(trans = "log1p", labels = scales::number_format(accuracy = 0.01))
+severe_cumulative_fig_later <- severe_cumulative_fig[[2]]+
+  theme(text = element_text(size = 20))+
+  scale_y_continuous(trans = "log1p", labels = scales::number_format(accuracy = 0.01))
+severe_meta_data_plot <- plot_metatime_cont(severe_cumulative, c("Onset", "Off Immunosuppresion", "EBV +", "CMV +", "HHV6 +", "Systemic_Steroids"), 'SampleID', label = labels, max_tp = severe_cumulative_fig[[3]])
+
+severe_meta_data_plot[[1]] <- severe_meta_data_plot[[1]]+
+  theme(text = element_text(size = 20))+
+  coord_cartesian(xlim = c(0,360))+
+  scale_x_continuous(expand = expansion(mult = c(0,0)))
+
+severe_meta_data_plot[[2]] <- severe_meta_data_plot[[2]]+
+  theme(text = element_text(size = 20))+
+  coord_cartesian(xlim = c(360,severe_cumulative_fig[[3]]))+
+  scale_x_continuous(expand = expansion(mult = c(0,0)))
+
+  severe_comb <- plot_grid(plotlist = list(severe_cumulative_fig_early, severe_cumulative_fig_later), ncol = 2, nrow = 1, hjust = 5, align = "h", rel_widths = c(1, .2))
+
+
+severe_meta_comb <- plot_grid(plotlist = list(severe_meta_data_plot[[1]], severe_meta_data_plot[[2]]), ncol = 2, nrow = 1, hjust = 5, align = "h", rel_widths = c(1, .2))
+
+Severe_meta_fig <- plot_grid(severe_comb, severe_meta_comb, nrow = 2, greedy = TRUE, rel_heights = c(1,.3))
+
+
+##Mild
+
+mild_cumulative_fig <- div_fig_pat(mild_cumulative,  'n_clone', c('allo'), 'PatientID', ylim = c(0, 2000))
+mild_cumulative_fig_early <- mild_cumulative_fig[[1]]+
+  labs(title = 'Mild GVHD', y = "# of Clones")+
+  theme(text = element_text(size = 20), plot.margin=unit(c(0,0,0,5.1), 'cm'))+
+  scale_y_continuous(trans = "log1p", labels = scales::number_format(accuracy = 0.01))
+mild_cumulative_fig_later <- mild_cumulative_fig[[2]]+
+  theme(text = element_text(size = 20))+
+  scale_y_continuous(trans = "log1p", labels = scales::number_format(accuracy = 0.01))
+mild_meta_data_plot <- plot_metatime_cont(mild_cumulative, c("Onset", "Off Immunosuppresion", "EBV +", "CMV +", "HHV6 +", "Systemic_Steroids"), 'SampleID', label = labels, max_tp = mild_cumulative_fig[[3]])
+
+mild_meta_data_plot[[1]] <- mild_meta_data_plot[[1]]+
+  theme(text = element_text(size = 20))
+
+mild_meta_data_plot[[2]] <- mild_meta_data_plot[[2]]+
+  theme(text = element_text(size = 20))
+
+  mild_comb <- plot_grid(plotlist = list(mild_cumulative_fig_early, mild_cumulative_fig_later), ncol = 2, nrow = 1, hjust = 5, align = "h", rel_widths = c(1, .2))
+
+
+mild_meta_comb <- plot_grid(plotlist = list(mild_meta_data_plot[[1]], mild_meta_data_plot[[2]]), ncol = 2, nrow = 1, hjust = 5, align = "h", rel_widths = c(1, .2))
+
+Mild_meta_fig <- plot_grid(mild_comb, mild_meta_comb, nrow = 2, greedy = TRUE, rel_heights = c(1,.3))
+
+
+##NO
+
+no_cumulative_fig <- div_fig_pat(no_cumulative,  'n_clone', c('allo'), 'PatientID', ylim = c(0, 2000))
+no_cumulative_fig_early <- no_cumulative_fig[[1]]+
+  labs(title = 'No GVHD', y = "# of Clones")+
+  theme(text = element_text(size = 20), plot.margin=unit(c(0,0,0,5.1), 'cm'))+
+  scale_y_continuous(trans = "log1p", labels = scales::number_format(accuracy = 0.01))
+no_cumulative_fig_later <- no_cumulative_fig[[2]]+
+  theme(text = element_text(size = 20))+
+  scale_y_continuous(trans = "log1p", labels = scales::number_format(accuracy = 0.01))
+no_meta_data_plot <- plot_metatime_cont(no_cumulative, c("Onset", "Off Immunosuppresion", "EBV +", "CMV +", "HHV6 +", "Systemic_Steroids"), 'SampleID', label = labels, max_tp = no_cumulative_fig[[3]])
+
+no_meta_data_plot[[1]] <- no_meta_data_plot[[1]]+
+  theme(text = element_text(size = 20))
+
+no_meta_data_plot[[2]] <- no_meta_data_plot[[2]]+
+  theme(text = element_text(size = 20))
+
+
+
+
+no_comb <- plot_grid(plotlist = list(no_cumulative_fig_early, no_cumulative_fig_later), ncol = 2, nrow = 1, hjust = 5, align = "h", rel_widths = c(1, .2))
+
+
+no_meta_comb <- plot_grid(plotlist = list(no_meta_data_plot[[1]], no_meta_data_plot[[2]]), ncol = 2, nrow = 1, hjust = 5, align = "h", rel_widths = c(1, .2))
+
+No_meta_fig <- plot_grid(no_comb, no_meta_comb, nrow = 2, greedy = TRUE, rel_heights = c(1,.3))
+
+
+plot(Severe_meta_fig)
+plot(Mild_meta_fig)
+plot(No_meta_fig)
+
+# --- Supplementary Figure 2b: # of Clones (n_clone) per-patient trajectories ---
+# Mirrors the save pattern of the shannons.diversity block above (no ggsave
+# existed for this metric in either the original or corrected notebook).
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/severe_cumulative_nclone.png'), Severe_meta_fig, width = 18/1.1, height = 10/1.1, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/mild_cumuluative_nclone.png'), Mild_meta_fig, width = 18/1.1, height = 10/1.1, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/no_cumuluative_nclone.png'), No_meta_fig, width = 18/1.1, height = 10/1.1, dpi = 600)
+
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/severe_cumulative_nclone.pdf'), Severe_meta_fig, width = 18/1.1, height = 10/1.1, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/mild_cumuluative_nclone.pdf'), Mild_meta_fig, width = 18/1.1, height = 10/1.1, dpi = 600)
+ggsave(paste0(OUTPUT_PATH, '/Figure1ex/no_cumuluative_nclone.pdf'), No_meta_fig, width = 18/1.1, height = 10/1.3, dpi = 600)
+
+tab_supp2b <- patient_data_all_clinic %>% distinct(PatientID, GVHD_GRADE_1) %>% group_by(GVHD_GRADE_1) %>% summarise(N = n(), .groups = "drop")
+make_sample_size_fig(tab_supp2b, "GVHD_GRADE_1", "severe_cumulative_nclone", grade3_colors, "Figure1ex", "severe_cumulative_nclone")
+make_sample_size_fig(tab_supp2b, "GVHD_GRADE_1", "mild_cumuluative_nclone", grade3_colors, "Figure1ex", "mild_cumuluative_nclone")
+make_sample_size_fig(tab_supp2b, "GVHD_GRADE_1", "no_cumuluative_nclone", grade3_colors, "Figure1ex", "no_cumuluative_nclone")
+
+```
