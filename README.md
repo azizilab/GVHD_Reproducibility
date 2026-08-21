@@ -15,6 +15,7 @@ We further examined spatial transcriptomics data to elucidate the tissue archite
 
 Data Access
 
+- Raw FASTQ files: [GEO GSE307215](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE307215)
 - TCR raw data: https://drive.google.com/drive/folders/1bum2Z2LbJ6CuspDRHoZm_UG5jxtA4tZ7?usp=share_link
 - Visium raw data and intermediate files: https://drive.google.com/drive/folders/1N2SJfrH7kDa3tjfcgwfZ4RbEJegAvXhT?usp=share_link (Starfysh deconvolution signature: `GVHD_spatial_signature_v8_major_curated_unique_epi_tcells_subset_Transition_EPI_REFINE.csv`)
 - scRNA raw data and intermediate files: https://drive.google.com/drive/folders/1yV3ByTQL-CTCRNtnZf6tnRKFycLZseWp?usp=share_link (meta file: `scRNAseq_TCR_samples_meta_LS-15_f.xlsx`)
