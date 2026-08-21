@@ -13,6 +13,16 @@ We performed mixed lymphocyte reactions (MLRs) combined with high-throughput TCR
 We profiled immune cells in gut biopsies from 14 GVHD patients and two normal donors using paired single-cell transcriptomics and TCR sequencing.
 We further examined spatial transcriptomics data to elucidate the tissue architecture and cell-cell interactions underlying GvHD.
 
+Data Access
+
+- TCR raw data: https://drive.google.com/drive/folders/1bum2Z2LbJ6CuspDRHoZm_UG5jxtA4tZ7?usp=share_link
+- Visium raw data and intermediate files: https://drive.google.com/drive/folders/1N2SJfrH7kDa3tjfcgwfZ4RbEJegAvXhT?usp=share_link (Starfysh deconvolution signature: `GVHD_spatial_signature_v8_major_curated_unique_epi_tcells_subset_Transition_EPI_REFINE.csv`)
+- scRNA raw data and intermediate files: https://drive.google.com/drive/folders/1yV3ByTQL-CTCRNtnZf6tnRKFycLZseWp?usp=share_link (meta file: `scRNAseq_TCR_samples_meta_LS-15_f.xlsx`)
+- MLR raw data and meta file: https://drive.google.com/drive/folders/1oyI_0J4Lk4-Sx1CYpHzdhNx-I0KqO4Bf?usp=sharing
+- MLR PTcy analysis (5 additional patients) raw data and meta files: https://drive.google.com/drive/folders/1ftcSLg4Bx-BiXCFiQpUNSSJ-2spo8bAa?usp=drive_link
+- DecompTCR input data: https://drive.google.com/drive/folders/1nWfx-3WkVEzTe4uYZl30jx9bezV8zHcX?usp=drive_link
+- CDR3 amino acid analysis input: https://drive.google.com/drive/folders/1mRUPh0apwHe0LyPwnUqpOtrTvWDtoBcU?usp=drive_link
+
 Figures
 
 The table below maps each published figure to the notebook(s)/script(s) that generate it, following the layout used in [decipher_reproducibility](https://github.com/azizilab/decipher_reproducibility). Paths are relative to this repository's root. `MLR_Pipelines/README.md` and `DecipherTCR/README.md` contain additional per-panel detail for their pipelines.
@@ -162,8 +172,6 @@ Gating strategy for cell sorting (flow cytometry); not produced by a notebook in
 
 ## Supplementary Figure 33
 - Sc&TCR_Pipelines/11.Migration_analysis.ipynb
-
-Data Access
 
 Acknowlegement
 
